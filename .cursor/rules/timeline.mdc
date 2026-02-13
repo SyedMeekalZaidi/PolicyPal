@@ -1,0 +1,170 @@
+---
+alwaysApply: true
+---
+
+### Status Tracking (Update as we build)
+
+**Legend:** ✅ Done | 🟡 In progress | ⏳ Planned | ❌ Blocked | ⏸️ Deferred  
+**Today:** Feb 13 (Day 1 of 19)  
+**Current Iteration:** 1 (Foundation + Inquire)  
+**Last updated:** Feb 13
+
+### **Iteration 1: Foundation + Inquire (Feb 13-19, 7 days)**
+
+**Goal:** End-to-end vertical slice (upload doc → ask question → get answer)
+
+**Feb 13 (Day 1): Database + Auth** 🟡
+
+- Supabase schema (users, documents, chunks, sets, conversations, checkpoints)
+- User profile form (industry, location)
+- Test auth flow
+
+**Feb 14 (Day 2): Document Ingestion** ⏳
+
+- Upload endpoint
+- PyPDFLoader + chunking
+- Embeddings + pgvector insert
+- Test with 2 PDFs
+
+**Feb 15 (Day 3): TipTap Setup** ⏳
+
+- Install TipTap + Mention extension
+- Build autocomplete dropdown (Actions, Sets, Documents, Web)
+- UUID resolution on selection
+- Test @ tagging
+
+**Feb 16 (Day 4): LangGraph Core** ⏳
+
+- PostgresSaver setup
+- Basic graph structure (START → nodes → END)
+- Intent Resolver node (classify action)
+- Test routing
+
+**Feb 17 (Day 5): Document Resolver + Validation** ⏳
+
+- Document Resolver node (explicit/implicit/hybrid)
+- Validation node (check action requirements)
+- Context inference logic
+- Test with conversation history
+
+**Feb 18-19 (Day 6-7): Inquire Action** ⏳
+
+- Retrieval: Adaptive-k semantic search
+- GPT-4o-mini generation
+- Confidence scoring
+- Citations + cost tracking
+- **End-to-end test: Upload → Tag → Ask → Answer**
+
+**Deliverable:** Working Inquire with full agentic flow
+
+---
+
+### **Iteration 2: Summarize + Compare (Feb 20-23, 4 days)**
+
+**Goal:** Add 2 more actions using proven patterns
+
+**Feb 20 (Day 8): Summarize** ⏳
+
+- Stratified sampling retrieval (copy Inquire retrieval structure)
+- GPT-4o-mini generation
+- Test multi-doc summarization
+
+**Feb 21 (Day 9): Compare (Focused mode)** ⏳
+
+- Targeted retrieval (same as Inquire)
+- GPT-4o-mini difference table
+- Test 2-3 doc comparison
+
+**Feb 22-23 (Day 10-11): Compare (Holistic mode)** ⏳
+
+- Theme extraction logic
+- GPT-4o generation (switch model)
+- 5-section report output
+- Test with different doc structures
+
+**Deliverable:** 3 of 4 actions working
+
+---
+
+### **Iteration 3: Audit (Feb 24-26, 3 days)**
+
+**Goal:** Most complex action with dual modes
+
+**Feb 24 (Day 12): Audit - Text Mode** ⏳
+
+- Direct semantic search (3-5 chunks/target)
+- GPT-4o structured output (per-target findings)
+- Test email vs 2-3 policies
+
+**Feb 25 (Day 13): Audit - Policy Mode** ⏳
+
+- Theme extraction from source policy
+- Per-theme retrieval logic
+- Test policy vs 2-3 regulations
+
+**Feb 26 (Day 14): Audit Polish** ⏳
+
+- Severity grouping
+- Consequence field population
+- Confidence scoring per finding
+- **Full MVP testing (all 4 actions)**
+
+**Deliverable:** Complete MVP (all actions + agentic flows)
+
+---
+
+### **Iteration 4: Context Management + Polish (Feb 27-28, 2 days)**
+
+**Goal:** Handle long conversations + UI refinement
+
+**Feb 27 (Day 15): Long Conversation Management** ⏳
+
+- Message window logic (last 10-15)
+- GPT-4o-mini summarization (at 15+ messages)
+- Test with 30-message conversation
+
+**Feb 28 (Day 16): Frontend Polish** ⏳
+
+- Confidence badges (✅ ⚠️ 🔴)
+- Citation tooltips
+- Cost tracking display
+- Document library UI (color coding)
+- Empty states
+
+**Deliverable:** Polished, production-ready MVP
+
+---
+
+### **Iteration 5: Advanced Feature - Streaming (Mar 1-2, 2 days)**
+
+**Goal:** Real-time response streaming (v1.1 feature)
+
+**Mar 1 (Day 17): Backend Streaming** ⏳
+
+- FastAPI StreamingResponse setup
+- LangGraph streaming output
+- Token-by-token yield
+- Test streaming vs non-streaming
+
+**Mar 2 (Day 18): Frontend Streaming** ⏳
+
+- React Query streaming mutations
+- Word-by-word display in chatbox
+- Loading states
+- **Full system test with streaming**
+
+**Deliverable:** MVP + streaming (portfolio differentiator)
+
+---
+
+### **Iteration 6: Deployment Prep (Mar 3, 1 day)**
+
+**Mar 3 (Day 19): Deploy + Demo** ⏳
+
+- Render deployment (FastAPI)
+- Vercel deployment (Next.js)
+- Environment variables
+- Demo script (5-minute walkthrough)
+- GitHub README with architecture diagram
+
+**Deliverable:** Live demo + portfolio-ready project

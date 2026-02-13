@@ -1,0 +1,158 @@
+---
+alwaysApply: true
+---
+
+# PolicyPal Design System
+
+Modern, airy SaaS aesthetic with glassmorphism and layered depth.
+
+## 🎨 Design Principles
+
+1. **Glassmorphism** - Layered translucent cards with soft shadows
+2. **Airy & Spacious** - Generous whitespace, light blue backgrounds
+3. **Smooth Depth** - Gradient backgrounds, elevation through shadow
+4. **Rounded Everything** - Large border-radius (16px+) for modern feel
+5. **Shadcn/ui Only** - Never use raw HTML form elements
+
+---
+
+## 🎯 Color Palette
+
+### Primary Colors
+| Color | Hex | CSS Variable | Usage |
+|-------|-----|--------------|-------|
+| **Primary Blue** | `#4A9EFF` | `text-primary` | CTAs, active states, primary actions |
+| **Dark Grey** | `#1A1A1A` | `text-foreground` | Main headings, body text |
+| **Medium Grey** | `#6B7280` | `text-muted` | Secondary text, descriptions |
+
+### Background Layers (Blue Gradient System)
+| Color | Hex | CSS Class | Usage |
+|-------|-----|-----------|-------|
+| Page Background | `#BFD9F0` | `bg-background` | Main app background (light blue) |
+| Section Background | `#ECF4FF` | `bg-section` | Secondary areas, list backgrounds |
+| Card Background | `#F4F8FD` | `bg-card` | Chat messages, content cards |
+| Input Background | `#EDF4FB` | `bg-input` | Chat input, form fields |
+| Pure White | `#FFFFFF` | `bg-white` | Buttons, modals, emphasis |
+
+### Interactive States
+| Color | Hex | CSS Class | Usage |
+|-------|-----|-----------|-------|
+| Hover/Selected | `#3B8FF2` | `bg-selected` | Selected items, hover states |
+| Sidebar Active | `#BFD9F0` | `bg-sidebar` | Active nav, sidebar background |
+
+### Semantic Colors (From Features)
+| Color | Hex | CSS Class | Usage |
+|-------|-----|-----------|-------|
+| **Gold** | `#FEC872` | `text-gold` / `border-gold` | Regulatory docs accent |
+| **Green** | `#10B981` | `text-green` / `border-green` | Company docs accent |
+| **Success** | `#DDFAD2` | `bg-success` | Success states, confirmations |
+| **Error** | `#FFE6E6` | `bg-error` | Error states, warnings |
+
+---
+
+## 📝 Typography
+
+### Font Family
+- **Primary:** Inter or System UI stack
+- **Monospace:** For code blocks only
+
+### Heading Styles
+| Class | Styles | Usage |
+|-------|--------|-------|
+| `heading-1` | `text-2xl font-bold text-foreground` | Page titles |
+| `heading-2` | `text-xl font-semibold text-foreground` | Section headings |
+| `heading-3` | `text-lg font-medium text-foreground` | Card titles |
+
+### Body Text
+| Class | Styles | Usage |
+|-------|--------|-------|
+| `body-default` | `text-base text-foreground leading-relaxed` | Main content |
+| `body-muted` | `text-sm text-muted` | Timestamps, metadata |
+| `body-small` | `text-xs text-muted` | Fine print, captions |
+
+---
+
+## 📐 Spacing & Layout
+
+### Standard Spacing
+- **Card padding:** `p-6` (24px)
+- **Card gaps:** `gap-4` (16px between cards)
+- **Section padding:** `p-8` (32px)
+- **Input padding:** `px-4 py-3` (16px horizontal, 12px vertical)
+
+### Border Radius
+- **Cards:** `rounded-2xl` (16px)
+- **Buttons:** `rounded-xl` (12px)
+- **Pills/Badges:** `rounded-full`
+
+### Shadows (Glassmorphism)
+- **Card elevation:** `shadow-lg shadow-blue-200/20`
+- **Modal:** `shadow-2xl shadow-blue-300/30`
+- **Hover lift:** `hover:shadow-xl transition-shadow`
+
+---
+
+## 🧩 Component Patterns
+
+### Cards
+- White or light blue background (`bg-card` or `bg-white`)
+- Large border-radius (`rounded-2xl`)
+- Soft shadow with blue tint
+- Generous padding (`p-6`)
+- Hover: subtle lift effect
+
+### Document Cards (Color-Coded)
+- **Regulatory docs:** Left border `border-l-4 border-gold`
+- **Company docs:** Left border `border-l-4 border-green`
+- **Set colors:** Custom colors as right inner shadow or background tint
+
+### Sidebar
+- **Collapsed:** Icon-only, 60px wide
+- **Expanded:** 240px wide
+- **Background:** `bg-sidebar` with subtle gradient
+- **Active state:** Blue background with white icon
+
+### Chat Interface
+- **Layout:** 3-column (Sidebar 60px/240px | Middle column 30% | Chat 60%)
+- **Messages:** White cards on `bg-card` background
+- **Input:** `bg-input` with rounded corners, ample padding
+
+### Buttons
+- **Primary:** `bg-primary text-white hover:bg-primary/90`
+- **Secondary:** `bg-white text-foreground border hover:bg-gray-50`
+- **Icon only:** `rounded-xl p-2 hover:bg-selected/10`
+
+### Modals
+**Fixed Sizes:**
+- `sm` (400px) - Confirmations
+- `md` (560px) - Forms
+- `lg` (720px) - Complex content
+
+**Style:** White background, large shadow, centered
+
+---
+
+## ✅ UI Rules for AI
+
+1. **Shadcn/ui ONLY** - Use components from `/src/components/ui/`
+2. **Check Existing First** - Search `/src/components` before creating new
+3. **Follow Patterns** - Copy structure from similar existing components
+4. **Consistent Spacing** - Use `gap-2`, `gap-4`, `gap-6` (multiples of 2)
+5. **Hover States** - All interactive elements need hover feedback
+6. **Loading States** - Show skeleton/spinner for async operations
+7. **Empty States** - Use ghost cards with icon + message
+8. **Responsive** - Mobile-first, use `md:` and `lg:` breakpoints
+9. **Animations** - Use Framer Motion for page transitions, card reveals
+10. **Icons** - Lucide React only, size `h-4 w-4` (buttons) or `h-5 w-5` (headers)
+
+---
+
+## 🚫 Never Do
+
+- ❌ Raw HTML `<input>`, `<select>`, `<textarea>` (use Shadcn Input/Select)
+- ❌ Inline styles (use Tailwind classes)
+- ❌ Arbitrary colors (stick to brand palette)
+- ❌ Inconsistent spacing (use design system classes)
+- ❌ Layout shifts (fixed modal sizes, skeleton loaders)
+- ❌ Missing hover states on interactive elements
+- ❌ Unmarked required fields in forms
