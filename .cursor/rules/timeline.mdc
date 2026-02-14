@@ -5,19 +5,22 @@ alwaysApply: true
 ### Status Tracking (Update as we build)
 
 **Legend:** ✅ Done | 🟡 In progress | ⏳ Planned | ❌ Blocked | ⏸️ Deferred  
-**Today:** Feb 13 (Day 1 of 19)  
+**Today:** Feb 14 (Day 2 of 19)  
 **Current Iteration:** 1 (Foundation + Inquire)  
-**Last updated:** Feb 13
+**Last updated:** Feb 14
 
 ### **Iteration 1: Foundation + Inquire (Feb 13-19, 7 days)**
 
 **Goal:** End-to-end vertical slice (upload doc → ask question → get answer)
 
-**Feb 13 (Day 1): Database + Auth** 🟡
+**Feb 14 (Day 2): Landing + Auth UI Complete** ✅
 
-- Supabase schema (users, documents, chunks, sets, conversations, checkpoints)
-- User profile form (industry, location)
-- Test auth flow
+- ✅ Supabase schema (users, documents, chunks, sets, conversations, checkpoints)
+- ✅ Design system foundation (CSS vars, Tailwind config, Inter font, light theme)
+- ✅ Landing page with animated feature cards
+- ✅ Auth pages split-screen layout with PolicyPal branding
+- ✅ Template cleanup (removed tutorial components, unused files)
+- ✅ User profile form (industry, location) - deferred to Task 4
 
 **Feb 14 (Day 2): Document Ingestion** ⏳
 

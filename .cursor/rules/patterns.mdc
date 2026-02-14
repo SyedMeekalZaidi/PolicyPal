@@ -1,0 +1,14 @@
+---
+alwaysApply: true
+---
+
+We need to ensure thorughout our whole app we have proper error handling and helpful error/success messaages to the user.
+
+## Database
+
+**Migration Workflow (ALWAYS follow):**
+1. Create migration: `supabase migration new <name>`
+2. Apply to DB: `supabase db push`
+3. **Regenerate types**: `npx supabase gen types typescript --project-id vezidnvayhhlhcwnqbzp > lib/supabase/database.types.ts`
+
+**Never manually edit `database.types.ts`** - always regenerate from live schema to avoid drift. 

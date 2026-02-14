@@ -64,7 +64,7 @@ Consider: Breaking changes, performance, state management complexity, demo relia
 ### Step 5: Create Implementation Plan
 
 **Output ONE document** - concise, beginner-friendly, NO CODE (only snippets if essential):
-- Create it under the /plans/feature-name
+- Create it under the /.plans/feature-name/feature.md
 
 ```markdown
 # Implementation Plan: [Feature Name]

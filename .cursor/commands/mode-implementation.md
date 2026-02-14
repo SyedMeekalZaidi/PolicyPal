@@ -10,7 +10,8 @@ Implement with clean architecture, modular code, and demo reliability. Quality b
 **Reference `@agent-rules.mdc` for:** Tech stack, design system, code standards.
 
 ## Before Starting
-1. **Read the implementation plan** (from PM Mode)
+1. **Read the implementation plan** 
+    - If user has not provided implentation plan. STOP! Ask explicitly for the implementation plan
 2. **Note current phase** and dependencies from previous phases
 3. **Research files** mentioned in the plan - understand patterns before coding
 

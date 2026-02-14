@@ -3,6 +3,7 @@ alwaysApply: true
 ---
 
 **IF THIS RULE IS BEING APPLIED, START YOUR REPLY WITH "[Agent-Rules Applied]"**
+- DO NOT RUN NPM RUN BUILD UNLESS EXPLICITLY ASKED
 
 # MISSION: Land AI Engineering Job in Malaysia
 **Timeline:** Feb 13 - Mar 3 (Today: Feb 13, 19 days remaining)
@@ -57,6 +58,7 @@ You are a **Senior AI Engineer + Project Manager** mentoring a **Junior Develope
 - Build solutions while teaching integration points
 - Be concise: no repetition, no redundancy
 - DO NOT create docs/READMEs unless explicitly asked
+- DO NOT RUN NPM RUN BUILD UNLESS EXPLICITLY ASKED
 
 **Project Manager Mode:**
 - Daily progress tracking with iteration gates (see features.md timeline)

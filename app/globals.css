@@ -4,57 +4,27 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
-    --radius: 0.5rem;
-  }
-  .dark {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
+    /* PolicyPal Blue Palette - Light Theme Only */
+    --background: 208 80% 95%;         /* #BFD9F0 - light blue page bg */
+    --foreground: 0 0% 10%;           /* #1A1A1A - dark grey text */
+    --card: 214 60% 97%;              /* #F4F8FD - card bg */
+    --card-foreground: 0 0% 10%;      /* #1A1A1A - card text */
+    --popover: 214 60% 97%;           /* #F4F8FD - popover bg */
+    --popover-foreground: 0 0% 10%;   /* #1A1A1A - popover text */
+    --primary: 209 100% 64%;          /* #4A9EFF - primary blue */
+    --primary-foreground: 0 0% 100%;  /* #FFFFFF - white text on primary */
+    --secondary: 0 0% 96%;            /* light grey secondary */
+    --secondary-foreground: 0 0% 10%; /* dark text on secondary */
+    --muted: 210 100% 96%;            /* #ECF4FF - section bg */
+    --muted-foreground: 220 9% 46%;   /* #6B7280 - medium grey */
+    --accent: 210 100% 96%;           /* #ECF4FF - accent bg */
+    --accent-foreground: 0 0% 10%;    /* dark text on accent */
+    --destructive: 0 84% 60%;         /* red for errors */
+    --destructive-foreground: 0 0% 98%; /* white text on red */
+    --border: 211 64% 89%;            /* #D1E3F6 - light blue border */
+    --input: 211 53% 95%;             /* #EDF4FB - input bg */
+    --ring: 209 100% 64%;             /* #4A9EFF - focus ring */
+    --radius: 0.75rem;                /* 12px - our design uses rounded-xl */
   }
 }
 
@@ -63,6 +33,165 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
+    position: relative;
+    overflow-x: hidden;
+    /* Enhanced gradient background - more vibrant with top-to-bottom flow */
+    background: linear-gradient(180deg, 
+      hsl(var(--background)) 0%,
+      hsl(var(--muted)) 50%,
+      hsl(var(--background)) 100%
+    );
+  }
+  
+  /* Gradient orb background system - creates rich depth for glassmorphism */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: -1;
+    pointer-events: none;
+    background-image: 
+      radial-gradient(circle at 15% 20%, rgba(74, 158, 255, 0.25) 0%, transparent 50%),
+      radial-gradient(circle at 85% 15%, rgba(59, 143, 242, 0.2) 0%, transparent 50%),
+      radial-gradient(circle at 45% 65%, rgba(129, 226, 250, 0.3) 0%, transparent 45%),
+      radial-gradient(circle at 75% 85%, rgba(74, 158, 255, 0.15) 0%, transparent 50%),
+      radial-gradient(circle at 25% 85%, rgba(236, 244, 255, 0.5) 0%, transparent 40%);
+    filter: blur(60px);
+  }
+}
+
+/* Premium Glassmorphism Utilities - CSS.glass inspired */
+@layer utilities {
+  /* Glass Card Type 1: Light - For feature cards, standard content */
+  .glass-card-light {
+    background: rgba(245, 245, 245, 0.6);
+    backdrop-filter: blur(4.7px);
+    -webkit-backdrop-filter: blur(4.7px);
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    position: relative;
+  }
+
+  /* Pure glass gradient border - light grey/transparent */
+  .glass-card-light::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: linear-gradient(135deg, 
+      rgba(255, 255, 255, 0.12) 0%, 
+      rgba(240, 240, 240, 0.04) 20%,
+      transparent 40%,
+      rgba(220, 220, 220, 0.06) 60%,
+      transparent 80%,
+      rgba(255, 255, 255, 0.1) 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Glass Card Type 2: Medium - For emphasized cards, CTAs, hero elements */
+  .glass-card-medium {
+    background: linear-gradient(90deg, rgba(245, 245, 245, 0.4) 0%, rgba(235, 235, 235, 0.17) 99%);
+    backdrop-filter: blur(5.5px);
+    -webkit-backdrop-filter: blur(5.5px);
+    box-shadow: 0 6px 35px rgba(0, 0, 0, 0.12);
+    border: 1px solid rgba(255, 255, 255, 1);
+    position: relative;
+  }
+
+  /* Slightly stronger pure glass border for emphasized cards */
+  .glass-card-medium::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: linear-gradient(135deg, 
+      rgba(255, 255, 255, 0.15) 0%, 
+      rgba(240, 240, 240, 0.05) 20%,
+      transparent 40%,
+      rgba(200, 200, 200, 0.08) 60%,
+      transparent 80%,
+      rgba(255, 255, 255, 0.12) 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Navbar/UI glass - subtle for fixed elements */
+  .glass-nav {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 4px 20px rgba(74, 158, 255, 0.08);
+    border-bottom: 1px solid rgba(191, 217, 240, 0.3);
+  }
+
+  /* Browser fallback for unsupported backdrop-filter */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .glass-card-light,
+    .glass-card-medium {
+      background: rgba(245, 245, 245, 0.95);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    }
+    .glass-nav {
+      background: rgba(255, 255, 255, 0.98);
+    }
+  }
+}
+
+/* Button hover enhancements */
+@layer components {
+  /* Base button hover style - for blue buttons (default, secondary) */
+  .btn-glass-hover {
+    position: relative;
+    transition: all 0.3s ease;
+  }
+
+  /* Blue button hover outline - white/transparent gradient */
+  .btn-glass-hover::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: linear-gradient(135deg, 
+      rgba(255, 255, 255, 0.8) 0%, 
+      rgba(255, 255, 255, 0.3) 50%,
+      transparent 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+  }
+
+  .btn-glass-hover:hover::before {
+    opacity: 1;
+  }
+
+  .btn-glass-hover:hover {
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  /* White/outline button hover - blue gradient outline */
+  .btn-glass-hover.border::before {
+    background: linear-gradient(135deg, 
+      rgba(74, 158, 255, 0.7) 0%, 
+      rgba(129, 226, 250, 0.5) 50%,
+      transparent 100%
+    );
   }
 }

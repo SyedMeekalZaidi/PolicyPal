@@ -51,7 +51,7 @@ Discuss any major issues concisley
 Research the above critical issues, think critically about the fix. Then see if the solution fits properly into the system architecture and overall plan and also the low-level details and edge cases. If no, pause and report the issue to the user, explain the issue concisely and suggest an alternative. If yes, update the implementation plan accordingly. Ensure after fixing the implementation plan, review it one time and ensure it makes logical sense and is cohesive.  
 
 # Mode Implement Prompt
-Research thorughly what u need to fix and ensure your implementation will be correct and integrate properly into the codebase. Then implement phase <num>. Do not create any extra documentation files. 
+Research thorughly what u need to build and ensure your implementation will be correct and integrate properly into the codebase. Then implement phase <num>. Do not create any extra documentation files. 
 
 # Debug 
 Read the codebase carefully, understand what the porblem is, explain your hypothesis high level consely. 

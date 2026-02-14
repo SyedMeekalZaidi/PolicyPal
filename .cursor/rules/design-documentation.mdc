@@ -94,8 +94,24 @@ Modern, airy SaaS aesthetic with glassmorphism and layered depth.
 
 ## 🧩 Component Patterns
 
+### Premium Glassmorphism Cards
+**Three-Layer System** (see `globals.css` for `.glass-card-light` and `.glass-card-medium`):
+1. **Background gradient** - Never solid colors; use gradients for depth
+2. **Solid border** - 1-2px white border for definition (`border: 1px solid rgba(255, 255, 255, 1)`)
+3. **Pseudo-element gradient border** - `::before` with gradient overlay for premium effect
+
+**Glass Card Types:**
+- `.glass-card-light` - Standard feature cards, list items
+- `.glass-card-medium` - Hero sections, emphasized CTAs, product showcases
+
+**Key Techniques:**
+- Use `linear-gradient()` for backgrounds (90deg horizontal flow)
+- Combine `backdrop-filter: blur()` with semi-transparent backgrounds
+- Layer effects: gradient bg → solid border → gradient pseudo-border
+- Add `pointer-events: none` to pseudo-elements
+
 ### Cards
-- White or light blue background (`bg-card` or `bg-white`)
+- Use glass utility classes (`glass-card-light`, `glass-card-medium`)
 - Large border-radius (`rounded-2xl`)
 - Soft shadow with blue tint
 - Generous padding (`p-6`)
@@ -118,9 +134,18 @@ Modern, airy SaaS aesthetic with glassmorphism and layered depth.
 - **Input:** `bg-input` with rounded corners, ample padding
 
 ### Buttons
+**Base Styles:**
 - **Primary:** `bg-primary text-white hover:bg-primary/90`
 - **Secondary:** `bg-white text-foreground border hover:bg-gray-50`
 - **Icon only:** `rounded-xl p-2 hover:bg-selected/10`
+
+**Hover Gradient Outlines** (applied via `btn-glass-hover` class):
+- **Blue buttons** (default/secondary): White-to-transparent gradient outline
+  - `rgba(255, 255, 255, 0.8) → rgba(255, 255, 255, 0.3) → transparent`
+- **White buttons** (outline): Blue-to-transparent gradient outline
+  - `rgba(74, 158, 255, 0.7) → rgba(129, 226, 250, 0.5) → transparent`
+- **Critical:** Use `inset: 0` (not negative) to avoid gaps between button and outline
+- Gradient flows diagonally (`135deg`) for premium effect
 
 ### Modals
 **Fixed Sizes:**
@@ -156,3 +181,5 @@ Modern, airy SaaS aesthetic with glassmorphism and layered depth.
 - ❌ Layout shifts (fixed modal sizes, skeleton loaders)
 - ❌ Missing hover states on interactive elements
 - ❌ Unmarked required fields in forms
+- ❌ Solid color backgrounds on glass cards (always use gradients)
+- ❌ Negative inset values on hover outlines (causes gaps)
