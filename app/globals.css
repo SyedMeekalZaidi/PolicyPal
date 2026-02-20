@@ -195,3 +195,53 @@
     );
   }
 }
+
+/* Animated rotating glass outline (reusable) */
+@property --pp-border-angle {
+  inherits: false;
+  initial-value: 0deg;
+  syntax: "<angle>";
+}
+
+@layer components {
+  /* Rotating glass border — uses ::after to avoid conflict with btn-glass-hover ::before */
+  .glass-outline-rotating {
+    position: relative;
+    isolation: isolate;
+    --pp-border-angle: 0deg;
+  }
+
+  .glass-outline-rotating::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+      from var(--pp-border-angle),
+      rgba(255, 255, 255, 0.9) 0%,
+      rgba(255, 255, 255, 0.95) 8%,
+      rgba(191, 217, 240, 0.7) 16%,
+      rgba(74, 158, 255, 0.5) 24%,
+      rgba(255, 255, 255, 0.85) 36%,
+      rgba(255, 255, 255, 0.9) 50%,
+      rgba(255, 255, 255, 0.95) 58%,
+      rgba(191, 217, 240, 0.7) 66%,
+      rgba(74, 158, 255, 0.5) 74%,
+      rgba(255, 255, 255, 0.85) 86%,
+      rgba(255, 255, 255, 0.9) 100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    z-index: -1;
+    animation: pp-border-rotate 10s linear infinite;
+  }
+
+  @keyframes pp-border-rotate {
+    to {
+      --pp-border-angle: 360deg;
+    }
+  }
+}

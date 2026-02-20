@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # LangSmith
     langsmith_api_key: str
-    langsmithtracing_v2: str = "true"
+    langsmith_tracing_v2: str = "true"
     langsmith_project: str = "policypal"
     
     class Config:

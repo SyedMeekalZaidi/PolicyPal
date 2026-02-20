@@ -1,11 +1,9 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getUserIdFromClaims, isProfileComplete } from "@/lib/profile/gate";
-import { ChatList } from "@/components/dashboard/chat-list";
-import { ChatPanel } from "@/components/dashboard/chat-panel";
-import { SidebarRight } from "@/components/dashboard/sidebar-right";
+import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 
-// Dashboard skeleton shell (Phase 4): layout only, no chat logic yet.
+// Dashboard page: server-side auth + profile gate, then renders the client shell.
 export default async function DashboardPage() {
   const supabase = await createClient();
   const { data, error } = await supabase.auth.getClaims();
@@ -25,21 +23,21 @@ export default async function DashboardPage() {
     .eq("id", userId)
     .maybeSingle();
 
-  // Hard gate: cannot access dashboard until onboarding is complete.
   if (!isProfileComplete(profile)) {
     redirect("/onboarding");
   }
 
+  // Resolve display name from auth metadata
+  const { data: authUser } = await supabase.auth.getUser();
+  const metadata = authUser?.user?.user_metadata || {};
+  const firstName = metadata.first_name || metadata.firstName || "";
+  const lastName = metadata.last_name || metadata.lastName || "";
+  const fullName = `${firstName} ${lastName}`.trim() || authUser?.user?.email?.split("@")[0] || "User";
+  const email = authUser?.user?.email || "";
+
   return (
-    <main className="min-h-screen px-6 py-8">
-      <div className="max-w-7xl mx-auto min-h-[calc(100vh-4rem)]">
-        <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr_300px] gap-6 min-h-[calc(100vh-4rem)]">
-          <ChatList />
-          <ChatPanel />
-          <SidebarRight />
-        </div>
-      </div>
+    <main className="h-screen p-4 overflow-hidden">
+      <DashboardShell userName={fullName} userEmail={email} />
     </main>
   );
 }
-

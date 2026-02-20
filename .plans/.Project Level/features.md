@@ -48,6 +48,62 @@ High-level summary and architecture decisions.
 
 ---
 
+## App Layout (Locked)
+
+### Public Pages
+- **Landing page** (`/`) — Navbar + Hero + Features + CTA + Footer. Navbar shows UserMenu pill if authenticated (with "Go to Dashboard" CTA in hero).
+- **Auth pages** (`/auth/*`) — Split-screen: left branding panel + right glass card form.
+- **Onboarding** (`/onboarding`) — Animated welcome + glass form (Company Name, Country, Industry, Description). Gates dashboard access.
+
+### Dashboard (`/dashboard`) — 3-Panel Layout (full viewport, `h-screen`)
+
+```
+┌─────────────┬──────────────────────┬────────────┐
+│  Left Panel │     Chat Panel       │  Sources   │
+│  (320px)    │     (fluid)          │  (300px)   │
+│             │                      │ collapsible│
+│ [Chats|Docs]│  Chat Name    Brand  │            │
+│  tab toggle │                      │ Documents  │
+│             │  Messages area       │ Web        │
+│  List of    │  (citations,         │            │
+│  items      │   confidence)        │ Citation   │
+│             │                      │ excerpts   │
+│             │  ┌────────────────┐  │            │
+│             │  │ TipTap @input  │  │    [x]     │
+│ [UserInfo]  │  └────────────────┘  │            │
+└─────────────┴──────────────────────┴────────────┘
+```
+
+**Left Panel** — Tabbed (Chats / Documents):
+- Tab bar at top toggles between conversation list and document library
+- Plus button: creates new chat (Chats tab) or opens upload modal (Documents tab)
+- UserInfoBar at bottom: initials avatar, user name, settings icon
+
+**Chat Panel** — Center (fluid width):
+- Header: conversation title (left) + "PolicyPal" branding (right)
+- Messages area: user/AI messages with inline citation icons + confidence badges
+- Input: TipTap rich text editor with @ mention autocomplete (Actions, Sets, Documents, Web)
+
+**Sources Panel** — Right (collapsible):
+- Shows document citations and web sources used in current chat
+- Citation click in chat → loads relevant excerpts vertically (scrollable)
+- Collapse: animates right, leaves glass peek strip with rotating outline
+- Auto-opens when user clicks a citation icon in chat
+
+### Component References (for AI context)
+| Name | Path | Description |
+|------|------|-------------|
+| `LeftPanel` | `components/dashboard/left-panel.tsx` | Tabbed Chats/Documents with user footer |
+| `ChatPanel` | `components/dashboard/chat-panel.tsx` | Messages + TipTap input |
+| `SourcesPanel` | `components/dashboard/sources-panel.tsx` | Collapsible citations panel |
+| `DashboardShell` | `components/dashboard/dashboard-shell.tsx` | 3-panel layout + shared state |
+| `UserInfoBar` | `components/dashboard/user-info-bar.tsx` | Bottom bar in left panel |
+| `UserMenu` | `components/shared/user-menu.tsx` | Navbar pill (landing page) |
+| `SearchSelect` | `components/shared/search-select.tsx` | Reusable combobox with search |
+| `OnboardingForm` | `components/onboarding/onboarding-form.tsx` | Animated onboarding flow |
+
+---
+
 ## Features (Locked)
 
 ### 1. Auth & User Profile

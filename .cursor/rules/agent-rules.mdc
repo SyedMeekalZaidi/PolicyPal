@@ -12,9 +12,29 @@ alwaysApply: true
 # PROJECT: PolicyPal - Compliance RAG Agent
 Compliance officers audit policies against regulatory docs. Current process: manual reading of 100+ page documents. Solution: AI agent with smart document resolution, confidence-aware retrieval, multi-doc audit.
 
-## STACK (Locked - See plans/features.md)
-**Core:** LangGraph + GPT-4o/4o-mini + pgvector + TipTap + PostgresSaver + FastAPI + Next.js
-**Key:** Hybrid LLM routing, action-specific retrieval, windowed context management
+## Stack (Locked)
+
+| Layer | Decision |
+|-------|----------|
+| **Frontend** | Next.js + React + Shadcn + React Query + Zod + **TipTap** |
+| **Backend** | Python + FastAPI |
+| **Orchestration** | LangGraph |
+| **Observability** | LangSmith (mandatory) |
+| **LLM** | **GPT-4o + GPT-4o-mini** (hybrid: high-stakes = 4o, routine = 4o-mini) |
+| **Model Selection** | LLM service abstraction (action-based routing) |
+| **Embeddings** | text-embedding-3-small ($0.02/1M tokens) |
+| **Vector DB** | Supabase pgvector |
+| **Auth & data** | Supabase (Auth, Postgres, pgvector, Storage) |
+| **Hosting** | Vercel (Next.js), Render (FastAPI) |
+| **Web search** | Tavily (1k free/month) |
+| **Security** | Next.js API routes proxy; backend never exposed |
+| **Isolation** | Per-user; all chunks/queries scoped by `user_id` (data isolation maintained) |
+| **Document sets** | Custom-defined sets with dropdown autocomplete (e.g., "Bank Negara", "ISO 27001") |
+| **Memory** | PostgresSaver (persistent, survives restarts/refreshes) |
+| **Streaming** | Optional Tier 3 (chatbox responses) |
+| **@ Mentions** | TipTap rich text editor with Mention extension (Cursor-style autocomplete) |
+| **Multi-doc support** | 1-5 documents per action (batch retrieval, per-doc findings) |
+
 
 ## FEATURES (Locked - See plans/features.md)
 **4 Actions:** Summarize, Inquire, Compare, Audit (each with custom retrieval strategy)
