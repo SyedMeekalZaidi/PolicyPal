@@ -1,18 +1,19 @@
 "use client";
 
 // Dashboard 3-panel shell: manages shared layout state (e.g. sources panel collapse).
-import { useCallback, useState } from "react";
+// Center panel receives children from the route (empty state or active ChatPanel).
+import { useCallback, useState, type ReactNode } from "react";
 
 import { LeftPanel } from "@/components/dashboard/left-panel";
-import { ChatPanel } from "@/components/dashboard/chat-panel";
 import { SourcesPanel } from "@/components/dashboard/sources-panel";
 
 type Props = {
   userName: string;
   userEmail: string;
+  children: ReactNode;
 };
 
-export function DashboardShell({ userName, userEmail }: Props) {
+export function DashboardShell({ userName, userEmail, children }: Props) {
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
 
   const toggleSources = useCallback(() => {
@@ -26,9 +27,9 @@ export function DashboardShell({ userName, userEmail }: Props) {
         <LeftPanel userName={userName} userEmail={userEmail} />
       </div>
 
-      {/* Center: Chat (fills remaining space) */}
+      {/* Center: route content (empty state or active ChatPanel) */}
       <div className="flex-1 min-w-0">
-        <ChatPanel />
+        {children}
       </div>
 
       {/* Right: Sources (collapsible) */}

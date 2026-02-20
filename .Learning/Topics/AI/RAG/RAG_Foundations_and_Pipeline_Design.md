@@ -3,9 +3,10 @@
 ---
 
 ## The "Why" (Business Outcome)
+
 LLMs are trained on public data up to a cutoff date. They know nothing about *your* documents. RAG (Retrieval-Augmented Generation) is the architectural pattern that bridges this gap — it lets you inject your private, up-to-date knowledge into an LLM's answer *at query time*, without retraining the model.
 
-**Without RAG:** "What does our Capital Adequacy policy say?" → LLM guesses or says "I don't know."
+**Without RAG:** "What does our Capital Adequacy policy say?" → LLM guesses or says "I don't know."  
 **With RAG:** The system finds the 3 most relevant chunks from your uploaded PDF, injects them, and the LLM answers accurately.
 
 ---
@@ -41,11 +42,13 @@ Think of Phase 1 as building a library index. Phase 2 is using that index to fin
 ### Level 3 — Each Step Explained
 
 **Step 1: Extract Text**
+
 - Tool: `pypdf` (reads the raw text from each page of a PDF)
 - Output: A list of strings, one per page
 - Edge case: Scanned PDFs are *images*, not text — `pypdf` returns nothing. Must reject with a helpful error.
 
 **Step 2: Chunk**
+
 - Tool: `RecursiveCharacterTextSplitter`
 - Why chunk? LLMs work best with focused context. Sending a full chapter is noisy.
 - **Chunk size:** 1000 characters (~250 tokens) — enough for a complete idea
@@ -53,23 +56,27 @@ Think of Phase 1 as building a library index. Phase 2 is using that index to fin
 - Output: Many smaller text pieces, each tagged with its source page number (critical for citations later)
 
 **Step 3: Embed**
+
 - Tool: OpenAI `text-embedding-3-small`
 - What is an embedding? A list of 1536 numbers (a vector) that represents the *meaning* of a text. Texts with similar meanings produce vectors that are mathematically close together.
 - Why batch? OpenAI charges per API call overhead. Sending 500 chunks in 1 call is ~100x cheaper than 500 individual calls.
 - Output: 1536-dimensional vector per chunk
 
 **Step 4: Store in Vector DB**
+
 - Tool: `pgvector` (a PostgreSQL extension)
 - Stores: chunk text + embedding vector + metadata (page number, document ID, user ID)
 - Indexed with HNSW (a graph algorithm) for fast nearest-neighbour search at scale
 
 **Step 5: Retrieve (at query time)**
+
 - Embed the user's question using the same model
 - Search pgvector for the K chunks whose vectors are closest to the question vector
 - "Closest" = most semantically similar = most relevant
 - Return top-K chunks (typically 3–8 depending on complexity)
 
 **Step 6: Generate**
+
 - Inject the chunks into the LLM prompt as context
 - LLM reads them and generates a grounded answer
 - Because the LLM only sees the relevant chunks, it stays accurate and focused
@@ -78,12 +85,14 @@ Think of Phase 1 as building a library index. Phase 2 is using that index to fin
 
 ### Level 4 — Key Design Decisions & Tradeoffs
 
-| Decision | Option A | Option B | Winner (for PolicyPal) |
-|---|---|---|---|
-| Chunk size | 500 chars (small) | 1000 chars (medium) | 1000 — enough context per chunk |
-| Overlap | 0 (no overlap) | 150 chars | 150 — prevents boundary cuts |
-| Embedding model | `text-embedding-3-large` | `text-embedding-3-small` | small — 5x cheaper, 90% as good |
-| Top-K chunks | 3 | 8 | Depends on action (Inquire=3, Audit=8) |
+
+| Decision        | Option A                 | Option B                 | Winner (for PolicyPal)                 |
+| --------------- | ------------------------ | ------------------------ | -------------------------------------- |
+| Chunk size      | 500 chars (small)        | 1000 chars (medium)      | 1000 — enough context per chunk        |
+| Overlap         | 0 (no overlap)           | 150 chars                | 150 — prevents boundary cuts           |
+| Embedding model | `text-embedding-3-large` | `text-embedding-3-small` | small — 5x cheaper, 90% as good        |
+| Top-K chunks    | 3                        | 8                        | Depends on action (Inquire=3, Audit=8) |
+
 
 **The core tradeoff:** Larger chunks = more context per chunk, fewer chunks needed → cheaper retrieval. But larger chunks are noisier — the LLM gets irrelevant sentences alongside the key fact. Smaller chunks = more precise, but risk cutting ideas mid-sentence.
 
@@ -92,6 +101,7 @@ Think of Phase 1 as building a library index. Phase 2 is using that index to fin
 ### Level 5 — What Makes RAG "Agentic"
 
 Basic RAG always searches all documents. Agentic RAG (what PolicyPal does) adds:
+
 - **Smart document selection:** The agent decides *which* documents to search before querying
 - **Confidence scoring:** The agent rates how sure it is, based on similarity scores
 - **Action-specific retrieval:** Inquire uses 3 chunks, Audit uses 8 — different needs, different strategies
@@ -100,14 +110,17 @@ Basic RAG always searches all documents. Agentic RAG (what PolicyPal does) adds:
 ---
 
 ## Struggle Points
+
 *(To be filled as you work through the material)*
-- [ ] Why overlap prevents lost information at chunk boundaries
-- [ ] How vector similarity actually works mathematically (dot product vs cosine)
-- [ ] Why `text-embedding-3-small` dimensions (1536) aren't arbitrary
+
+- Why overlap prevents lost information at chunk boundaries
+- How vector similarity actually works mathematically (dot product vs cosine)
+- Why `text-embedding-3-small` dimensions (1536) aren't arbitrary
 
 ---
 
 ## Active Recall Questions
+
 1. A user uploads a scanned PDF (image-based). What happens at the extraction step, and how does our system handle it?
 2. Why do we chunk with 150-character overlap instead of 0?
 3. What is the difference between Phase 1 (ingestion) and Phase 2 (retrieval)? Which is slower?
@@ -118,6 +131,10 @@ Basic RAG always searches all documents. Agentic RAG (what PolicyPal does) adds:
 
 ## Spaced Repetition Log
 
-| Date | Interval (Days) | Next Review | Status |
-|---|---|---|---|
-| Feb 20, 2026 | — | — | 📖 Need to Learn |
+
+| Date         | Interval (Days) | Next Review | Status           |
+| ------------ | --------------- | ----------- | ---------------- |
+| Feb 20, 2026 | —               | —           | 📖 Need to Learn |
+| Feb 20, 2026 | 1               | Feb 21, 2026 | ✅ Reviewed      |
+
+

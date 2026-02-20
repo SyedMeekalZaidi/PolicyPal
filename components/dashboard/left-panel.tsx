@@ -2,12 +2,15 @@
 
 // Dashboard left panel: tabbed Chats/Documents with contextual actions and user info footer.
 import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
 import { FileText, MessageCircle, Plus, Upload } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { UserInfoBar } from "@/components/dashboard/user-info-bar";
 import { DocumentPanel } from "@/components/documents/document-panel";
+import { ConversationList } from "@/components/conversations/conversation-list";
+import { useCreateConversation } from "@/hooks/mutations/use-create-conversation";
 
 type Tab = "chats" | "documents";
 
@@ -20,13 +23,20 @@ export function LeftPanel({ userName, userEmail }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [uploadOpen, setUploadOpen] = useState(false);
 
+  const router = useRouter();
+  const createConversation = useCreateConversation();
+
   const handlePlus = useCallback(() => {
     if (activeTab === "chats") {
-      // TODO: create new conversation
+      const id = crypto.randomUUID();
+      createConversation.mutate(
+        { id, title: "New conversation" },
+        { onSuccess: () => router.push(`/dashboard/${id}`) }
+      );
     } else {
       setUploadOpen(true);
     }
-  }, [activeTab]);
+  }, [activeTab, createConversation, router]);
 
   return (
     <section className="glass-card-light rounded-2xl flex flex-col h-full overflow-hidden">
@@ -67,6 +77,7 @@ export function LeftPanel({ userName, userEmail }: Props) {
           className="rounded-xl bg-transparent h-8 w-8"
           aria-label={activeTab === "chats" ? "New chat" : "Upload document"}
           onClick={handlePlus}
+          disabled={activeTab === "chats" && createConversation.isPending}
         >
           {activeTab === "chats" ? (
             <Plus className="h-4 w-4" />
@@ -79,7 +90,7 @@ export function LeftPanel({ userName, userEmail }: Props) {
       {/* Content: chat list or document list */}
       <div className="flex-1 overflow-hidden p-4">
         {activeTab === "chats" ? (
-          <ChatsContent />
+          <ConversationList />
         ) : (
           <DocumentPanel
             uploadModalOpen={uploadOpen}
@@ -95,20 +106,3 @@ export function LeftPanel({ userName, userEmail }: Props) {
     </section>
   );
 }
-
-function ChatsContent() {
-  return (
-    <div className="h-full rounded-xl border border-white/10 bg-white/10 p-4 flex items-center justify-center text-center">
-      <div className="max-w-[200px]">
-        <div className="mx-auto mb-3 h-10 w-10 rounded-2xl bg-primary/10 flex items-center justify-center">
-          <MessageCircle className="h-5 w-5 text-primary" />
-        </div>
-        <p className="text-sm font-medium text-foreground">No conversations yet</p>
-        <p className="text-xs text-muted-foreground mt-1">
-          Start a chat to begin analyzing your documents.
-        </p>
-      </div>
-    </div>
-  );
-}
-

@@ -1,43 +1,37 @@
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import { getUserIdFromClaims, isProfileComplete } from "@/lib/profile/gate";
-import { DashboardShell } from "@/components/dashboard/dashboard-shell";
+// Dashboard empty state: shown when no conversation is selected (/dashboard).
+import { Sparkles } from "lucide-react";
 
-// Dashboard page: server-side auth + profile gate, then renders the client shell.
-export default async function DashboardPage() {
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.getClaims();
-
-  if (error || !data?.claims) {
-    redirect("/auth/login");
-  }
-
-  const userId = getUserIdFromClaims(data.claims);
-  if (!userId) {
-    redirect("/auth/login");
-  }
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("company_name,industry,location")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (!isProfileComplete(profile)) {
-    redirect("/onboarding");
-  }
-
-  // Resolve display name from auth metadata
-  const { data: authUser } = await supabase.auth.getUser();
-  const metadata = authUser?.user?.user_metadata || {};
-  const firstName = metadata.first_name || metadata.firstName || "";
-  const lastName = metadata.last_name || metadata.lastName || "";
-  const fullName = `${firstName} ${lastName}`.trim() || authUser?.user?.email?.split("@")[0] || "User";
-  const email = authUser?.user?.email || "";
-
+export default function DashboardPage() {
   return (
-    <main className="h-screen p-4 overflow-hidden">
-      <DashboardShell userName={fullName} userEmail={email} />
-    </main>
+    <section className="glass-card-medium rounded-2xl flex flex-col h-full overflow-hidden">
+      <header className="flex items-center justify-between gap-3 p-4 pb-3">
+        <h2 className="text-sm font-semibold text-foreground truncate">
+          New conversation
+        </h2>
+        <span className="text-sm font-bold text-primary flex-shrink-0">
+          PolicyPal
+        </span>
+      </header>
+
+      <div className="flex-1 mx-4 rounded-xl border border-white/10 bg-white/10 overflow-auto">
+        <div className="h-full w-full flex items-center justify-center text-center p-4">
+          <div className="max-w-[340px]">
+            <div className="mx-auto mb-3 h-10 w-10 rounded-2xl bg-primary/10 flex items-center justify-center">
+              <Sparkles className="h-5 w-5 text-primary" />
+            </div>
+            <p className="text-sm font-medium text-foreground">
+              You&apos;re ready.
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Upload documents and start a chat. This panel will show messages
+              and citations.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Spacer matching ChatPanel input area height for visual consistency */}
+      <div className="p-4 pt-3" />
+    </section>
   );
 }

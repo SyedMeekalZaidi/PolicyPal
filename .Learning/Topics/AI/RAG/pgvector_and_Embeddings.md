@@ -142,3 +142,4 @@ CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops);
 | Date | Interval (Days) | Next Review | Status |
 |---|---|---|---|
 | Feb 20, 2026 | — | — | 📖 Need to Learn |
+| Feb 20, 2026 | 1 | Feb 21, 2026 | ✅ Reviewed |

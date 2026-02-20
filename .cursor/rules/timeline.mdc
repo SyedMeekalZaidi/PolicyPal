@@ -38,7 +38,7 @@ alwaysApply: true
 - ✅ Pydantic config typo fix (`langsmith_tracing_v2`)
 - 🟡 E2E test with real PDFs — server runs, upload confirmed working, full test pending
 
-**Feb 15 (Day 3): Chat Interface + TipTap Setup** ⏳
+**Feb 15 (Day 3): Chat Interface + TipTap Setup** ✅
 
 - Install TipTap + Mention extension
 - Build autocomplete dropdown (Actions, Sets, Documents, Web)

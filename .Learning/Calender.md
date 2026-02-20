@@ -3,10 +3,10 @@
 | Topic | Last Reviewed | Interval (Days) | Next Review | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | How to Learn in the Age of AI | Feb 19, 2026 | 3 | Feb 22, 2026 | ✅ Reviewed |
-| Server/Client Components | Feb 14, 2026 | 1 | Feb 15, 2026 | ⏳ Due |
-| RAG Foundations & Pipeline Design | — | — | — | 📖 Need to Learn |
-| pgvector & Embeddings | — | — | — | 📖 Need to Learn |
-| State Management & TanStack Query | — | — | — | 📖 Need to Learn |
+| Server/Client Components | Feb 19, 2026 | 3 | Feb 22, 2026 | ✅ Reviewed |
+| RAG Foundations & Pipeline Design | Feb 20, 2026 | 1 | Feb 21, 2026 | ✅ Reviewed |
+| pgvector & Embeddings | Feb 20, 2026 | 1 | Feb 21, 2026 | ✅ Reviewed |
+| State Management & TanStack Query | Feb 20, 2026 | 1 | Feb 21, 2026 | ✅ Reviewed |
 
 ---
 

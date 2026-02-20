@@ -186,6 +186,38 @@
     -webkit-backdrop-filter: blur(8px);
   }
 
+  /* TipTap editor: remove default contenteditable outline and paragraph margins */
+  .tiptap {
+    @apply outline-none;
+  }
+  .tiptap p {
+    @apply m-0;
+  }
+  .tiptap p.is-editor-empty:first-child::before {
+    @apply text-muted-foreground pointer-events-none float-left h-0;
+    content: attr(data-placeholder);
+  }
+
+  /* Mention pills — glassmorphism inline tags in the editor */
+  .mention-pill {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.6;
+    white-space: nowrap;
+    vertical-align: baseline;
+    background: rgba(74, 158, 255, 0.18);
+    color: #1d6fd8;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(4px);
+  }
+  .mention-action   { background: rgba(74, 158, 255, 0.18);  color: #1d6fd8; }
+  .mention-document { background: rgba(74, 158, 255, 0.14);  color: #1d6fd8; }
+  .mention-set      { background: rgba(74, 158, 255, 0.22);  color: #1d6fd8; }
+  .mention-web      { background: rgba(74, 158, 255, 0.12);  color: #1d6fd8; }
+
   /* White/outline button hover - blue gradient outline */
   .btn-glass-hover.border::before {
     background: linear-gradient(135deg, 

@@ -5,7 +5,13 @@ alwaysApply: true
 We need to ensure thorughout our whole app we have proper error handling and helpful error/success messaages to the user.
 
 # Database
-    - Always refer to database.types.ts to understand up-to-date database schema 
+    - Always refer to database.types.ts to understand up-to-date database schema
+
+    **INSERT with `user_id` (client-side mutations):**
+    - If a table has `user_id NOT NULL` and the mutation uses `createBrowserClient` directly (no API route), you MUST call `supabase.auth.getUser()` first and include `user_id` in the insert payload.
+    - RLS `WITH CHECK (user_id = auth.uid())` will 403 if `user_id` is missing or wrong.
+    - This does NOT apply to mutations that go through a Next.js API route — the route injects `user_id` server-side from `supabase.auth.getUser()`.
+    - Pattern: `const { data: { user } } = await supabase.auth.getUser()` → include `user_id: user.id` in insert.
 
     **Migration Workflow (ALWAYS follow):**
     1. Create migration: `supabase migration new <name>`
