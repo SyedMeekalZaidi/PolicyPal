@@ -25,21 +25,18 @@ type LocalMessage = {
 
 /**
  * Walks a TipTap doc and renders text + mention nodes as React elements.
+ * Each top-level paragraph becomes a block so Shift+Enter line breaks are preserved.
  * Falls back to plain text if doc is absent (e.g. legacy messages, HMR state).
  */
 function renderMessageContent(doc: JSONContent | undefined, fallback: string): React.ReactNode {
   if (!doc?.content) return fallback;
 
-  const nodes: React.ReactNode[] = [];
-
-  function walk(node: JSONContent, keyPrefix: string) {
-    if (node.type === "text") {
-      nodes.push(node.text ?? "");
-      return;
-    }
+  function walkInline(node: JSONContent, keyPrefix: string): React.ReactNode {
+    if (node.type === "text") return node.text ?? "";
+    if (node.type === "hardBreak") return <br key={keyPrefix} />;
     if (node.type === "mention") {
       const label = node.attrs?.label ?? node.attrs?.id ?? "";
-      nodes.push(
+      return (
         <span
           key={keyPrefix}
           className="inline-block rounded-full px-2 py-0.5 text-xs font-semibold bg-white/25 border border-white/40 text-white backdrop-blur-sm leading-snug"
@@ -47,13 +44,17 @@ function renderMessageContent(doc: JSONContent | undefined, fallback: string): R
           @{label}
         </span>
       );
-      return;
     }
-    node.content?.forEach((child, i) => walk(child, `${keyPrefix}-${i}`));
+    return node.content?.map((child, i) => walkInline(child, `${keyPrefix}-${i}`));
   }
 
-  doc.content.forEach((child, i) => walk(child, `${i}`));
-  return nodes.length > 0 ? nodes : fallback;
+  const blocks = doc.content.map((para, i) => (
+    <span key={i} className="block">
+      {para.content?.map((child, j) => walkInline(child, `${i}-${j}`)) ?? ""}
+    </span>
+  ));
+
+  return blocks.length > 0 ? blocks : fallback;
 }
 
 export function ChatPanel({ conversationId, initialTitle }: Props) {

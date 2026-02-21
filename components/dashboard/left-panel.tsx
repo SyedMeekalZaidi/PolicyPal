@@ -4,6 +4,7 @@
 import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileText, MessageCircle, Plus, Upload } from "lucide-react";
+import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -31,7 +32,10 @@ export function LeftPanel({ userName, userEmail }: Props) {
       const id = crypto.randomUUID();
       createConversation.mutate(
         { id, title: "New conversation" },
-        { onSuccess: () => router.push(`/dashboard/${id}`) }
+        {
+          onSuccess: () => router.push(`/dashboard/${id}`),
+          onError: () => toast.error("Failed to create conversation"),
+        }
       );
     } else {
       setUploadOpen(true);

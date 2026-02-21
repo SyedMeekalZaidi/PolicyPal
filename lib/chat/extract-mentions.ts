@@ -67,3 +67,14 @@ export function countDocMentions(doc: JSONContent): number {
   walk(doc);
   return count;
 }
+
+/** Counts how many action mentions currently exist in a TipTap document. */
+export function countActionMentions(doc: JSONContent): number {
+  let count = 0;
+  function walk(node: JSONContent) {
+    if (node.type === "mention" && node.attrs?.category === "action") count++;
+    node.content?.forEach(walk);
+  }
+  walk(doc);
+  return count;
+}

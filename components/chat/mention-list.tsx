@@ -25,7 +25,7 @@ import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
 import { hexToRgba } from "@/lib/constants/colors";
-import { countDocMentions } from "@/lib/chat/extract-mentions";
+import { countActionMentions, countDocMentions } from "@/lib/chat/extract-mentions";
 import type { MentionItem } from "@/lib/chat/mention-items";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -118,8 +118,16 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
 
     const selectItem = useCallback(
       (index: number) => {
-        const item = props.items[index] ?? findFlatItem(sections, index);
+        const item = findFlatItem(sections, index);
         if (!item) return;
+
+        if (item.category === "action") {
+          const actionCount = countActionMentions(props.editor.getJSON());
+          if (actionCount >= 1) {
+            toast.warning("Only one action per query — remove the existing one first");
+            return;
+          }
+        }
 
         if (item.category === "document") {
           const docCount = countDocMentions(props.editor.getJSON());
