@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routers.chat import router as chat_router
 from app.routers.documents import router as documents_router
 
 app = FastAPI(title="PolicyPal API")
@@ -15,6 +16,7 @@ app.add_middleware(
 )
 
 app.include_router(documents_router, tags=["documents"])
+app.include_router(chat_router, tags=["chat"])
 
 
 @app.get("/")

@@ -228,6 +228,12 @@
   }
 }
 
+/* PalReasoning shimmer — gentler than animate-pulse (0.6→1 opacity, slower) */
+@keyframes pal-shimmer {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
 /* Animated rotating glass outline (reusable) */
 @property --pp-border-angle {
   inherits: false;

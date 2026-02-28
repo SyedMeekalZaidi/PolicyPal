@@ -4,6 +4,7 @@ export type MentionCategory = "action" | "set" | "document" | "web";
 
 export type ChatSubmitPayload = {
   text: string;
+  tiptap_json: JSONContent; // raw doc for backend Python pre-processor (doc name extraction, pure-mention detection)
   action: string | null;
   tagged_doc_ids: string[];
   tagged_set_ids: string[];
@@ -54,7 +55,7 @@ export function extractMentions(
 
   walk(doc);
 
-  return { text: plainText, action, tagged_doc_ids, tagged_set_ids, enable_web_search };
+  return { text: plainText, tiptap_json: doc, action, tagged_doc_ids, tagged_set_ids, enable_web_search };
 }
 
 /** Counts how many document mentions currently exist in a TipTap document. */
