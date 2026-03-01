@@ -125,6 +125,19 @@ class AgentState(TypedDict, total=False):
     # Candidate UUIDs surfaced for PalAssist medium-confidence choice prompt
     suggested_doc_ids: list[str]
 
+    # ── Query intelligence fields (set by doc_resolver, read by action nodes) ─
+
+    # Plain text from TipTap walk with all @mentions stripped.
+    # Computed once in doc_resolver; replaces broken per-node regex in action nodes.
+    # TRANSIENT — reset each turn in chat.py initial_state.
+    clean_query: str
+
+    # { uuid: title } for every resolved document — built from TipTap labels +
+    # conversation_docs registry in doc_resolver. Zero extra DB calls.
+    # Used by rewrite_query() and action nodes for citation enrichment.
+    # TRANSIENT — reset each turn in chat.py initial_state.
+    resolved_doc_titles: dict  # dict[str, str]
+
     # ── Retrieval result fields (set by action nodes) ───────────────────────
 
     # RAG chunks (empty list for stub actions until Iterations 2-3)
@@ -149,3 +162,13 @@ class AgentState(TypedDict, total=False):
 
     # Accumulated USD cost for this run
     cost_usd: float
+
+    # ── User context (injected from profiles table at run start) ────────────
+    # Read-only inside nodes — injected once by chat.py before graph.invoke()
+    user_industry: Optional[str]
+    user_location: Optional[str]
+
+    # ── Long conversation management (Phase 5) ───────────────────────────────
+    # Rolling summary of messages that have been windowed out.
+    # Persists across turns; never included in initial_input.
+    conversation_summary: Optional[str]

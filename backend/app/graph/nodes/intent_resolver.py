@@ -137,7 +137,7 @@ def intent_resolver(state: AgentState) -> dict:
     llm = get_llm_service()
     prompt = [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=last_message_text)]
 
-    classification = llm.invoke_structured("intent", IntentClassification, prompt)
+    classification = llm.invoke_structured("intent", IntentClassification, prompt).parsed
 
     logger.info(
         "intent_resolver | pass=1 action=%s confidence=%s web=%s multi=%s | %s",
@@ -151,7 +151,7 @@ def intent_resolver(state: AgentState) -> dict:
         last_5 = [m for m in messages[-6:] if not isinstance(m, SystemMessage)]
         # Rebuild with richer context
         context_prompt = [SystemMessage(content=_SYSTEM_PROMPT), *last_5]
-        classification = llm.invoke_structured("intent", IntentClassification, context_prompt)
+        classification = llm.invoke_structured("intent", IntentClassification, context_prompt).parsed
         logger.info(
             "intent_resolver | pass=2 action=%s confidence=%s web=%s | %s",
             classification.action, classification.confidence,

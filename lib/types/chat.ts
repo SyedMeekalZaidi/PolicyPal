@@ -44,11 +44,35 @@ export type StatusEvent = {
   web_query?: string;                            // only from action nodes with web search
 };
 
+// ---------------------------------------------------------------------------
+// Citation types (shared by ChatResponse and CitedMarkdown)
+// ---------------------------------------------------------------------------
+
+/** A single source citation produced by an action node. Mirrors backend Citation schema. */
+export type Citation = {
+  id: number;
+  source_type: "document" | "web";
+  doc_id?: string;   // UUID of the document (document citations only)
+  title: string;
+  page?: number;     // PDF page number (document citations only)
+  url?: string;      // URL (web citations only)
+  quote: string;     // verbatim excerpt from the source
+};
+
+/**
+ * Internal frontend state for a clicked citation bubble.
+ * spanId matches the data-cite-group attribute of the highlighted text span.
+ */
+export type CitationGroup = {
+  spanId: string;       // e.g. "msg123-g0" — globally unique across all messages
+  citationIds: number[]; // which Citation ids this group references
+};
+
 /** Terminal event — the final AI response. Ends the SSE stream. */
 export type ChatResponse = {
   type: "response";
   response: string;
-  citations: Record<string, unknown>[];
+  citations: Citation[];
   action: string;
   inference_confidence: string; // "high" | "medium" | "low"
   retrieval_confidence: string; // "high" | "medium" | "low"

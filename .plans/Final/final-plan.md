@@ -93,9 +93,10 @@
 **The foundational slice — everything after reuses this.**
 
 **Backend:**
+- **`LLMService` fix (FIRST):** Modify `invoke_structured()` to use `include_raw=True`, return `LLMResult(parsed, tokens_used, cost_usd)` instead of just Pydantic model. Update 3 existing callers (`intent_resolver`, `doc_resolver`, `validate_inputs`) to destructure via `.parsed`. (See Research §3 for details.)
 - SQL migration: `match_chunks` RPC function (see Research §1)
-- `retrieval_service.py`: `search_chunks(query, user_id, doc_ids, k, threshold)` → returns chunks + similarity scores + confidence tier
-- `tavily_service.py`: `web_search(query)` → returns formatted results
+- `retrieval_service.py`: `search_chunks(query, user_id, doc_ids, k, threshold)` + `stratified_sample(user_id, doc_ids)` → returns chunks + similarity scores + confidence tier
+- `tavily_service.py`: `def web_search(query)` → sync, uses `TavilyClient` (not async). Returns formatted results
 - **User context injection:** Add `user_industry`, `user_location` to `AgentState`. Fetch profile from Supabase in `/chat` endpoint (1 query), inject into `initial_state`. Action node system prompts include: "User works in {industry} in {location}. Tailor to their regulatory context." Omitted gracefully if profile is empty.
 - Replace `inquire` stub: adaptive-k retrieval (threshold 0.5 cosine similarity, max 15 chunks, 3-5 per doc) → conditional web search → GPT-4o-mini generation with citation extraction → confidence scoring
 - Citation schema: `{ id, source_type: "document"|"web", doc_id?, title, page?, url?, quote }`
@@ -117,25 +118,322 @@
   - Panel shows filtered citations (by group click) or all citations (by default / "View All" click)
 - Cost display: money icon next to confidence badge on every message
 
-**Persistence:**
-- `format_response`: store `retrieval_confidence`, `cost_usd`, `tokens_used` in AIMessage `additional_kwargs` so history reload shows confidence + cost
+**Persistence — `format_response` modification (detailed):**
+`format_response` currently only updates `conversation_docs`. It must also embed metadata into the AIMessage so history reload shows confidence + cost + citations.
+
+Specifically, `format_response` will:
+1. Read from state: `retrieval_confidence`, `cost_usd`, `tokens_used`, `citations`, `action`
+2. Get the last `AIMessage` from `state["messages"]` (the one the action node appended)
+3. Write these into `AIMessage.additional_kwargs`:
+   ```python
+   ai_msg.additional_kwargs["retrieval_confidence"] = state.get("retrieval_confidence", "low")
+   ai_msg.additional_kwargs["cost_usd"] = state.get("cost_usd", 0.0)
+   ai_msg.additional_kwargs["tokens_used"] = state.get("tokens_used", 0)
+   ai_msg.additional_kwargs["citations"] = state.get("citations", [])
+   ai_msg.additional_kwargs["action"] = state.get("action", "inquire")
+   ```
+4. Return the updated message (the checkpoint persists `additional_kwargs` — SSE reads from state, history reads from checkpoint)
+
+This ensures that when the frontend reloads chat history, each AI message carries its own confidence, cost, and citations — no re-computation needed.
 
 **Test:** Send "@Inquire what are the capital requirements in @BankNegara2024" → get RAG answer with grouped citation bubbles ("+2", "+1") inline. Click a bubble → text highlights + sources panel filters to those citations. Click "View All" → all citations shown, highlight removed. New message → sources panel auto-populates. Refresh → data persists.
 
 ---
 
-### Phase 1.5: LangSmith Observability (~15 min)
-**Activate tracing so we can debug Phases 2-4 via LangSmith dashboard.**
+## Phase 1 — Implementation Plan
 
-- Fix env vars: add `LANGSMITH_TRACING=true` + `LANGSMITH_PROJECT=policypal` to `.env` (see Research §7)
-- Add `load_dotenv()` to `main.py` so LangSmith reads env vars from `os.environ`
-- Rename `langsmith_tracing_v2` → `langsmith_tracing` in `config.py`
-- Add `@traceable` decorator to `retrieval_service.search_chunks()` and `tavily_service.web_search()` for granular trace visibility
-- Verify: run Inquire query → check trace appears at smith.langchain.com with full node tree + cost breakdown
+Six sub-phases, each independently testable. Must complete in order (each depends on the previous).
 
-**What's automatic (zero code):** Full trace tree per graph invocation, per-LLM-call token counts + costs, latency per node, input/output for each step, thread grouping (we already pass `thread_id` in config)
+### Sub-phase 1.1: Foundation (LLMService + Config + State)
+**Goal:** Fix the cost-tracking bug, add missing config fields, and extend AgentState — so all downstream code has a correct foundation.
 
-**Test:** Open smith.langchain.com → project "policypal" → see trace with nodes: intent_resolver → doc_resolver → validate_inputs → inquire → format_response, each with token/cost breakdown
+**Files to modify:**
+- `backend/app/services/llm_service.py`
+- `backend/app/graph/nodes/intent_resolver.py`
+- `backend/app/graph/nodes/doc_resolver.py`
+- `backend/app/graph/nodes/validate_inputs.py`
+- `backend/app/config.py`
+- `backend/app/graph/state.py`
+
+**Tasks:**
+1. [ ] Add `LLMResult` NamedTuple to `llm_service.py`: `(parsed: Any, tokens_used: int, cost_usd: float)`
+2. [ ] Modify `invoke_structured()`: use `with_structured_output(schema, include_raw=True)`, extract `raw_result["parsed"]` and `raw_result["raw"]`, pass raw AIMessage to `_log_usage`, compute + return `LLMResult(parsed, tokens, cost)`. If `usage_metadata` is missing, default to `(0, 0.0)`.
+3. [ ] Modify `_log_usage()` to RETURN `(tokens_used, cost_usd)` in addition to logging (currently returns None).
+4. [ ] Update `intent_resolver.py`: `llm_result = llm.invoke_structured(...)` → `result = llm_result.parsed`. All attribute access via `.parsed`. No other logic changes.
+5. [ ] Update `doc_resolver.py`: same destructuring pattern.
+6. [ ] Update `validate_inputs.py`: same destructuring pattern.
+7. [ ] Add `tavily_api_key: str = ""` to `Settings` in `config.py` (optional, empty default).
+8. [ ] Add `user_industry: str`, `user_location: str` to `AgentState` in `state.py`.
+
+**Test:** Start backend → run existing graph flow (send a message) → no regressions. LangSmith or logs now show actual token counts for structured calls.
+
+---
+
+### Sub-phase 1.2: Retrieval Layer (Migration + Services)
+**Goal:** The retrieval backbone used by all 4 actions. Semantic search via pgvector RPC + Tavily web search.
+
+**Files to create:**
+- `supabase/migrations/<timestamp>_match_chunks.sql`
+- `backend/app/services/retrieval_service.py`
+- `backend/app/services/tavily_service.py`
+
+**Files to modify:**
+- `backend/requirements.txt` (add `tavily-python`)
+
+**Tasks:**
+1. [ ] Create SQL migration: `match_chunks` RPC function (copy from Research §1 — accepts `query_embedding`, `filter_user_id`, `filter_doc_ids`, `match_threshold`, `match_count`; returns `id, document_id, chunk_index, page, content, similarity`).
+2. [ ] Run `supabase migration new match_chunks` → paste SQL → `supabase db push`.
+3. [ ] Create `retrieval_service.py` with:
+   - `search_chunks(query_text: str, user_id: str, doc_ids: list[str] | None, k: int = 15, threshold: float = 0.5) -> dict` — calls `embed_texts([query_text])[0]` (single vector), then `supabase.rpc("match_chunks", {...})`, post-processes: caps 3-5 chunks per doc to prevent single-doc domination, computes confidence tier from avg similarity (≥0.7=high, ≥0.5=medium, <0.5=low). **Title enrichment:** after getting chunks, collect unique `document_id`s, fetch titles via `get_supabase().from_("documents").select("id, title").in_("id", unique_ids)`, merge `doc_title` into each chunk dict. Returns `{"chunks": [...], "confidence_tier": str, "avg_similarity": float}` where each chunk has `{id, document_id, doc_title, chunk_index, page, content, similarity}`.
+   - `stratified_sample(user_id: str, doc_ids: list[str]) -> dict` — for each doc: query total chunk count, divide into 4 bands, fetch 3-4 chunks per band via Supabase table query (`.from_("chunks").select(...)...`). **Same title enrichment** as `search_chunks`. Returns `{"chunks": [...], "confidence_tier": "high"}`. (Used by Summarize/Compare holistic/Audit policy — NOT used in this sub-phase, but built now for reuse.)
+   - `_enrich_with_titles(chunks: list[dict]) -> list[dict]` — shared helper that fetches and merges `doc_title` for a list of chunks. Called by both `search_chunks` and `stratified_sample` (DRY).
+   - `_score_confidence(similarities: list[float]) -> tuple[str, float]` — returns `(tier, avg)`.
+   - Uses `get_supabase()` and `embed_texts()` from existing services.
+4. [ ] Create `tavily_service.py` with:
+   - `web_search(query: str, max_results: int = 5) -> list[dict]` — sync `TavilyClient`. Returns `[{title, url, content, score}]`. If `tavily_api_key` is empty, log warning and return `[]`. Wrap in try/except for API errors → return `[]` with logged warning.
+5. [ ] Add `tavily-python` to `requirements.txt`.
+
+**Test:** Python REPL or temp test script:
+- `search_chunks("capital requirements", user_id, [doc_id])` → returns chunks with similarity scores.
+- `web_search("Bank Negara capital requirements 2024")` → returns Tavily results (or `[]` if no API key).
+
+---
+
+### Sub-phase 1.3: Inquire Action Node
+**Goal:** Replace the Inquire stub with real RAG — retrieval, optional web search, LLM generation with citations, confidence scoring. The core of the vertical slice.
+
+**Files to create:**
+- `backend/app/models/action_schemas.py` (Pydantic models for all action responses — shared across phases)
+- `backend/app/graph/nodes/inquire.py`
+
+**Files to modify:**
+- `backend/app/graph/builder.py` (import `inquire_action` from new file instead of `stub_actions`)
+- `backend/app/routers/chat.py` (user context injection — profile fetch)
+
+**Tasks:**
+1. [ ] Create `action_schemas.py` with:
+   - `Citation(BaseModel)`: `id: int, source_type: Literal["document", "web"], doc_id: Optional[str], title: str, page: Optional[int], url: Optional[str], quote: str`
+   - `InquireResponse(BaseModel)`: `response: str, citations: list[Citation]`
+   - (Future phases will add `SummarizeResponse`, `CompareResponse`, `AuditResponse` here — single file for all action schemas.)
+2. [ ] Create `inquire.py` with `def inquire_action(state: AgentState) -> dict`:
+   - Read: `resolved_doc_ids`, `messages`, `enable_web_search`, `user_id`, `user_industry`, `user_location`
+   - Extract user query from last `HumanMessage`
+   - **Retrieve:** Call `retrieval_service.search_chunks(query, user_id, doc_ids, k=15, threshold=0.5)`
+   - **Web search (conditional):** If `enable_web_search` and Tavily is configured, generate a search query from user question, call `tavily_service.web_search(query)`. Store in `web_search_results`.
+   - **Build context block:** Format chunks as `[N] Source: {title} | Page: {page}\n"{content}"` (per Research §9). Append web results as additional numbered sources with `source_type: "web"`.
+   - **Build system prompt:** Role + RAG rules + context block + user context injection (if industry/location present). 150-250 words per §9 guidelines.
+   - **LLM call:** `llm_service.invoke_structured("inquire", InquireResponse, [system_msg, human_msg])` → `LLMResult(parsed, tokens, cost)`.
+   - **Return:** `{ "response": parsed.response, "citations": [c.model_dump() for c in parsed.citations], "retrieved_chunks": chunks, "retrieval_confidence": confidence_tier, "confidence_score": avg_sim, "tokens_used": tokens, "cost_usd": cost, "web_search_results": web_results, "web_search_query": query_used, "messages": [AIMessage(content=parsed.response)] }`
+3. [ ] Update `builder.py`: change `from app.graph.nodes.stub_actions import inquire_action` → `from app.graph.nodes.inquire import inquire_action`. Keep other 3 stubs unchanged.
+4. [ ] Update `chat.py` `/chat` endpoint: after building `initial_state`, fetch profile: `get_supabase().from_("profiles").select("industry, location").eq("id", user_id).single().execute()`. Add `"user_industry": profile.industry or ""`, `"user_location": profile.location or ""` to `initial_state`. Wrap in try/except — if profile fetch fails, default to empty strings.
+
+**Test:** Send "@Inquire what are the key policies in @BankNegara2024" via the chat UI.
+- PalReasoning shows "Clarifying intent..." → "Finding documents..." → "Researching your question..." → "Formatting response..."
+- Response: real RAG answer (not stub text) with `[1]`, `[2]` markers in the text
+- SSE `ChatResponse` contains `citations: [...]`, `tokens_used > 0`, `cost_usd > 0`
+- Frontend still displays as plain text (markdown rendering comes in 1.5) — but data is correct
+
+---
+
+### Sub-phase 1.4: format_response Enhancement
+**Goal:** Persist confidence, cost, citations, and action in the AIMessage checkpoint so history reload shows the same badges.
+
+**Files to modify:**
+- `backend/app/graph/nodes/format_response.py`
+
+**Tasks:**
+1. [ ] After the existing `conversation_docs` merge logic, add:
+   - Get the last `AIMessage` from `state["messages"]`
+   - Clone it with updated `additional_kwargs` containing: `retrieval_confidence`, `cost_usd`, `tokens_used`, `citations` (list of dicts), `action`
+   - Return the cloned message in `{"messages": [updated_ai_msg]}` so the `add_messages` reducer replaces the old one (same `id`)
+2. [ ] Edge case: if no AIMessage exists in messages (e.g., cancel flow), skip metadata injection.
+
+**Test:** Send Inquire query → get response → refresh page → `/chat/history` endpoint returns messages where the AI message's `additional_kwargs` contains `retrieval_confidence`, `cost_usd`, `tokens_used`, `citations`. Frontend still renders confidence dot + cost badge from the reloaded data.
+
+---
+
+### Sub-phase 1.5: Frontend — Markdown + Citation Bubbles
+**Goal:** Render AI responses as markdown with Perplexity-style grouped citation bubbles.
+
+**Files to create:**
+- `components/chat/cited-markdown.tsx` (CitedMarkdown + parsing logic)
+- `components/chat/citation-bubble.tsx` (glassmorphism pill)
+
+**Files to modify:**
+- `lib/types/chat.ts` (add `Citation`, `CitationGroup` types, update `ChatResponse.citations` to `Citation[]`)
+- `components/dashboard/chat-panel.tsx` (replace plain text `{m.text}` with `<CitedMarkdown>`)
+- `package.json` (install deps)
+
+**Tasks:**
+1. [ ] Run `npm install react-markdown remark-gfm`
+2. [ ] Add to `lib/types/chat.ts`:
+   - `Citation` type: `{ id: number, source_type: "document"|"web", doc_id?: string, title: string, page?: number, url?: string, quote: string }`
+   - `CitationGroup` type: `{ spanId: string, citationIds: number[] }`
+   - Update `ChatResponse.citations` from `Record<string, unknown>[]` to `Citation[]`
+3. [ ] Create `citation-bubble.tsx`:
+   - Props: `groupId`, `citationIds`, `count`, `onClick(groupId, citationIds)`, `isActive`
+   - Renders glassmorphism pill (design system: `rounded-full`, `bg-primary/10`, `border-primary/20`, `text-primary`, `text-xs font-medium`)
+   - Shows count: single = "1", multiple = "+3"
+   - Hover: subtle lift effect
+   - Active state: `bg-primary/20` when highlighted
+4. [ ] Create `cited-markdown.tsx`:
+   - Props: `content: string`, `citations: Citation[]`, `highlightedGroup: CitationGroup | null`, `onBubbleClick(group: CitationGroup | null)` (null = "View All" / clear highlight)
+   - **Parsing algorithm** (per Research §5):
+     a. Use `react-markdown` with `remarkGfm` for base rendering
+     b. Custom `components.p` and `components.li` override: process text children through citation parser
+     c. Citation parser: regex split on `/(\[\d+\](?:\[\d+\])*)/g`, group consecutive markers, merge text + markers into `CitedSegment[]`
+     d. Render each segment: `<span data-cite-group={gN} className={highlighted ? "cite-highlighted" : ""}>text</span>` + `<CitationBubble />`
+   - CSS class `cite-highlighted`: `bg-primary/10 rounded-sm px-0.5 transition-colors` (subtle highlight)
+   - Bottom "View All" pill: show only when `citations.length > 0`. Glassmorphism pill with file icon + `"{count} sources"`. onClick → `onBubbleClick(null)` (clears highlight, shows all)
+   - Edge case: no `[N]` markers but citations exist → still show "View All" button
+   - **Table wrapper:** wrap `<table>` in `<div className="overflow-x-auto">` for horizontal scroll (needed by Compare phase)
+5. [ ] Update `chat-panel.tsx` assistant bubble:
+   - Replace `{m.text}` with `<CitedMarkdown content={m.text} citations={m.response?.citations || []} highlightedGroup={...} onBubbleClick={...} />`
+   - Update cost display: replace 🪙 with `<DollarSign className="h-3 w-3" />` from Lucide
+   - Add local `highlightedGroup` state per message (or lift to context in 1.6)
+
+**Test:** Send Inquire query → response renders as markdown (bold, lists, etc.). Citation markers `[1][2]` appear as clickable pills inline. Click pill → text segment highlights with subtle blue background. "3 sources" pill at bottom. Cost icon is now a dollar sign. (Sources panel not yet wired — that's 1.6.)
+
+---
+
+### Sub-phase 1.6: Sources Panel + Citation Context
+**Goal:** Wire citation state across panels — clicking a citation bubble filters the Sources Panel, new messages auto-populate it.
+
+**Files to create:**
+- `context/citation-context.tsx` (React Context for citation state)
+- `components/dashboard/citation-card.tsx` (individual citation card in Sources Panel)
+
+**Files to modify:**
+- `components/dashboard/dashboard-shell.tsx` (wrap with CitationProvider, wire state)
+- `components/dashboard/sources-panel.tsx` (render real citations, support filtering)
+- `components/dashboard/chat-panel.tsx` (consume CitationContext, call setActiveCitations on new response, call setHighlightedGroup on bubble click)
+- `components/chat/cited-markdown.tsx` (use context instead of local state for highlighting)
+
+**Tasks:**
+1. [ ] Create `citation-context.tsx`:
+   - `CitationContextValue`: `{ activeCitations: Citation[], highlightedGroup: CitationGroup | null, setActiveCitations, setHighlightedGroup, sourcesCollapsed: boolean, toggleSources: () => void }`
+   - Provider owns `sourcesCollapsed` state (moved FROM DashboardShell — a component can't consume its own provider, so the panel collapse state must live inside the context)
+   - **Auto-expand logic** lives inside the Provider: `useEffect` watching `activeCitations.length` — when changes from 0 → non-zero, set `sourcesCollapsed = false`
+   - Default: empty citations, null highlighted, `sourcesCollapsed = false`
+2. [ ] Update `dashboard-shell.tsx`:
+   - Wrap `return` JSX with `<CitationProvider>`
+   - **Remove** local `sourcesCollapsed` state and `toggleSources` callback (now in context)
+   - SourcesPanel reads `sourcesCollapsed` and `toggleSources` from context instead of props
+   - DashboardShell becomes a thin layout wrapper — all citation + panel state managed by context
+3. [ ] Update `chat-panel.tsx`:
+   - Consume `CitationContext` via `useCitationContext()`
+   - In `onResponse` callback: call `setActiveCitations(event.citations)` to populate Sources Panel
+   - In bubble click handler: call `setHighlightedGroup({ spanId, citationIds })` or `setHighlightedGroup(null)` for "View All"
+   - When user clicks a different AI message's citation: replace `activeCitations` with that message's citations
+4. [ ] Update `cited-markdown.tsx`:
+   - Read `highlightedGroup` from context instead of props/local state
+   - `onBubbleClick` calls `setHighlightedGroup` from context
+5. [ ] Create `citation-card.tsx`:
+   - Props: `citation: Citation`
+   - Renders: icon (FileText for document, Globe for web), title, page number or URL, quote preview (truncated to 2 lines)
+   - Glassmorphism card style (match existing card patterns)
+6. [ ] Update `sources-panel.tsx`:
+   - Consume `CitationContext` (replaces `isCollapsed` and `onToggle` props — now reads `sourcesCollapsed`, `toggleSources`, `activeCitations`, `highlightedGroup` from context)
+   - If `activeCitations` is empty → show current empty state text
+   - If `activeCitations` is non-empty:
+     - If `highlightedGroup` is null → render ALL `activeCitations` as `<CitationCard>` list
+     - If `highlightedGroup` is set → render only citations whose `id` is in `highlightedGroup.citationIds`
+   - Section header: "Sources" with count badge
+   - Separate document and web citations into two groups with section dividers
+7. [ ] History reload support: when ChatPanel loads history, if user clicks an assistant message, set `activeCitations` from that message's `response.citations`. (Deferred to Phase 6 polish if time-pressed — not blocking.)
+
+**Test (full vertical slice):**
+1. "@Inquire what are the capital requirements in @BankNegara2024"
+2. PalReasoning indicators flow through
+3. Response renders as markdown with inline citation bubbles ("+2", "1")
+4. Sources Panel auto-expands with all citations (document cards with icons)
+5. Click a "+2" bubble → text highlights, Sources Panel filters to 2 citations
+6. Click "3 sources" (View All) → highlight removed, all citations shown
+7. Send a different message → new citations replace old ones in Sources Panel
+8. Refresh page → confidence dot + cost badge persist (citations in panel reset — expected, they reload on message click in Phase 6)
+
+---
+
+### Phase 1 — Dependency Graph
+
+```
+1.1 Foundation ──► 1.2 Retrieval ──► 1.3 Inquire Node ──► 1.4 format_response
+                                                                    │
+                                          1.5 Frontend Markdown ◄───┘
+                                                    │
+                                          1.6 Sources Panel + Context
+```
+
+### Phase 1 — Files Summary
+
+| Sub-phase | New files | Modified files |
+|-----------|-----------|----------------|
+| **1.1** | — | `llm_service.py`, `intent_resolver.py`, `doc_resolver.py`, `validate_inputs.py`, `config.py`, `state.py` |
+| **1.2** | `match_chunks.sql`, `retrieval_service.py`, `tavily_service.py` | `requirements.txt` |
+| **1.3** | `action_schemas.py`, `inquire.py` | `builder.py`, `chat.py` |
+| **1.4** | — | `format_response.py` |
+| **1.5** | `cited-markdown.tsx`, `citation-bubble.tsx` | `chat.ts`, `chat-panel.tsx`, `package.json` |
+| **1.6** | `citation-context.tsx`, `citation-card.tsx` | `dashboard-shell.tsx`, `sources-panel.tsx`, `chat-panel.tsx`, `cited-markdown.tsx` |
+
+### Phase 1 — Reuse by Future Phases
+
+| Built in Phase 1 | Reused by |
+|-------------------|-----------|
+| `retrieval_service.search_chunks()` | Inquire, Compare (focused), Audit (text mode) |
+| `retrieval_service.stratified_sample()` | Summarize, Compare (holistic), Audit (policy mode) |
+| `tavily_service.web_search()` | Inquire, Summarize, Audit (when web search enabled) |
+| `LLMResult` + fixed `invoke_structured()` | Every LLM call in every phase |
+| `Citation` Pydantic model | All 4 action schemas |
+| `CitedMarkdown` component | Every AI response in every action |
+| `CitationContext` | All citation interactions |
+| `citation-card.tsx` + `SourcesPanel` | All actions |
+| `format_response` metadata persistence | All actions |
+| User context injection | All action node prompts |
+
+---
+
+### Phase 1.7: LangSmith Observability (Consolidated Fix)
+
+**Root Cause:** The LangSmith SDK sends traces via a background batch thread (`auto_batch_tracing=True`). In FastAPI/uvicorn, this background thread silently dies or never flushes (documented: GitHub langsmith-sdk #457, #1630). `Client.list_projects()` works because it's a synchronous HTTP call that bypasses the tracing pipeline. `@traceable` functions succeed because they only *queue* data — they don't confirm delivery.
+
+**Two separate flush mechanisms needed:**
+- `Client().flush()` → flushes `@traceable` decorator trace queue
+- `wait_for_all_tracers()` from `langchain_core.tracers.langchain` → flushes LangChainTracer callback queue (used by LangGraph)
+
+**What's already done (keep):**
+- ✅ Env vars in `.env`: `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=policypal`, `LANGSMITH_ENDPOINT`
+- ✅ `load_dotenv(path, override=True)` at top of `main.py` before imports
+- ✅ Backward-compat aliases: `LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2`
+- ✅ `langsmith_endpoint` field in `config.py` Settings
+- ✅ `LangChainTracer` injected in graph config via `_make_graph_config()`
+- ✅ `@traceable` on `LLMService` methods, `inquire_action`, `format_response`
+- ✅ `tracing_context` wrapper around `graph.astream` in `_stream_graph()`
+- ✅ Startup API key validation via `Client.list_projects()`
+
+**Implementation — 3 changes:**
+
+**1. Shared LangSmith client singleton** (`backend/app/services/langsmith_client.py` — new file)
+- Create module-level `Client()` instance + export `flush_traces()` helper
+- `flush_traces()` calls both `client.flush()` AND `wait_for_all_tracers()`
+- Single import for any module that needs to flush
+
+**2. Startup ping with explicit flush** (`main.py`)
+- After `_ping()` runs, call `flush_traces()` to synchronously send the trace
+- Add 2-second sleep after flush + re-check via `client.list_runs()` to confirm delivery
+- Log whether the ping trace was actually received by LangSmith (not just queued)
+- Add `@app.on_event("shutdown")` handler that calls `flush_traces()` to drain remaining traces
+
+**3. Post-stream flush** (`chat.py`)
+- At the end of `_stream_graph()`, after the `with tracing_context` block exits, call `flush_traces()`
+- This ensures every graph run's traces are delivered before the SSE stream closes
+- Placed outside the `try/except` so it runs even on error paths
+
+**What's automatic (zero code):** Full trace tree per graph invocation (via `LangChainTracer` callback), per-LLM-call token counts + costs, latency per node, input/output for each step, thread grouping via `thread_id` in config, `@traceable` nested spans for LLMService/retrieval/tavily calls.
+
+**Test:** 
+1. Restart backend → check startup logs show "ping trace confirmed delivered"
+2. Send an Inquire query → check `policypal` project at smith.langchain.com
+3. Should see trace tree: intent_resolver → doc_resolver → validate_inputs → inquire → format_response, each with token/cost breakdown
 
 ---
 
@@ -154,9 +452,16 @@
 **Both focused + holistic modes in MVP.**
 
 - Replace `compare` stub
-- **Mode detection:** If user message includes a specific topic → focused mode. Otherwise → holistic.
+- **Mode detection — mini-LLM classification (NOT text-length heuristic):**
+  - First step in compare node: call GPT-4o-mini with a tiny structured output to classify intent
+  - Uses `llm_service.invoke_structured("intent", CompareIntent, msgs)` — routes to `gpt-4o-mini` via the `"intent"` action key (classification task, same routing as intent_resolver)
+  - Pydantic model: `CompareIntent(mode: Literal["focused", "holistic"], topic: Optional[str])`
+  - Prompt: "Given these documents and the user's request, determine: (a) is this a focused comparison about a specific topic, or a holistic general comparison? (b) if focused, what is the specific topic?"
+  - Cost: ~$0.001 per classification (negligible). Tokens/cost from this call are added to the action's total.
+  - **Why mini-LLM over heuristic:** A user might write "Do a holistic comparison of how @BankNegara and @FSA approach risk management, governance, and penalties — I want a thorough report" — long text but clearly holistic. Text-length heuristic would wrongly classify this as focused.
+  - **Bonus:** For focused mode, the extracted `topic` string becomes the retrieval query — more precise than using the raw user message
 - **Focused mode (GPT-4o-mini):**
-  - Per-doc targeted retrieval (same as Inquire, scoped per doc, k=7 each)
+  - Per-doc targeted retrieval using the extracted `topic` as query (scoped per doc, k=7 each)
   - LLM generates difference TABLE (markdown) for 2-3 docs
   - Table format: `| Aspect | Doc1 | Doc2 | (Doc3) |` — clear per-doc breakdown
   - **Table UX:** CSS `overflow-x: auto` wrapper on markdown tables so they scroll horizontally if needed. Max 3 doc columns to keep it readable.
@@ -168,8 +473,9 @@
 - `extract_themes()` helper lives in `backend/app/services/theme_service.py` — reused by Audit policy mode
 
 **Test:** 
-- Focused: "@Compare @BankNegara2024 @FSA capital requirements" → markdown table
+- Focused: "@Compare @BankNegara2024 @FSA capital requirements" → markdown table (mini-LLM extracts topic: "capital requirements")
 - Holistic: "@Compare @BankNegara2024 @FSA" (no topic) → 5-section report
+- Edge: "@Compare @BankNegara2024 @FSA give me a thorough analysis of everything" → holistic (mini-LLM recognizes "everything" = holistic despite long text)
 
 ---
 
@@ -177,12 +483,17 @@
 **Both text mode + policy mode in MVP.**
 
 - Replace `audit` stub
-- **Mode detection:** If source is free text in message (no source doc tagged) → text mode. If source doc is tagged → policy mode.
-- **Text mode (short source < 1000 words):**
+- **Mode detection — deterministic via `doc_type` from database:**
+  - Query `documents` table for resolved doc IDs → check `doc_type` field (`company_policy` or `regulatory_source`)
+  - If at least one resolved doc has `doc_type = 'company_policy'` → **policy mode** (that doc is "source", regulatory docs are "targets")
+  - If ALL resolved docs are `regulatory_source` (no company policy tagged) → **text mode** (user's message text is the "source", tagged docs are "targets")
+  - Edge case: multiple `company_policy` docs → first one is source, rest become additional targets (warn user)
+  - Edge case: no resolved docs at all → text mode with user's message as source, search all user docs
+- **Text mode (source = user's free text):**
   - Embed source text (from HumanMessage) → `match_chunks` scoped to target doc_ids
   - k=5 per target, threshold=0.6 (higher precision for compliance)
   - GPT-4o structured findings per target
-- **Policy mode (long source — doc tagged as source):**
+- **Policy mode (source = company_policy doc):**
   - Step 1: Stratified sampling of source doc (reuse from Summarize, ~10 chunks)
   - Step 2: `extract_themes()` (reuse from Compare, shared helper) → 3-5 themes
   - Step 3: Per-theme retrieval against target docs (2-3 chunks per target per theme)
@@ -202,13 +513,22 @@
 ### Phase 5: Long Conversation Management (~30 min)
 **Prevent context overflow for long conversations.**
 
+- **Dedicated graph node `summarize_context`** (NOT a helper function — changed from original plan)
+  - Placed between `validate_inputs` and action routing in graph builder
+  - **Why a node instead of a helper:** Our SSE indicator system emits per-node. A helper inside an action node has no SSE visibility. A dedicated node naturally emits "Summarizing conversation..." via `NODE_STATUS_MAP` → `PalReasoning` shows it to the user.
 - Add `conversation_summary: str` field to `AgentState`
-- Manual summarization in action nodes (NOT `langmem` — see Research §4)
-- Before LLM call: if messages > 15, summarize older messages using GPT-4o-mini
-- Cache summary in state, regenerate every 10 messages
-- Pass `[summary_message] + [last 10 messages]` to action LLM
+- Add `"summarize_context": "Summarizing conversation..."` to `NODE_STATUS_MAP`
+- **Node logic:**
+  1. If messages ≤ 15 → return `{}` immediately (zero latency, no indicator shown for short conversations)
+  2. If `conversation_summary` exists and is still fresh (not stale by 10+ messages) → return `{}` (reuse cached summary)
+  3. Otherwise → call GPT-4o-mini to summarize old messages (1 to N-10) → return `{"conversation_summary": summary_text}`
+- **Action nodes** (Inquire, Summarize, Compare, Audit) do a simple inline check:
+  - If `state["conversation_summary"]` exists → send `[SystemMessage(summary)] + [last 10 messages]` to LLM
+  - If not → send full `state["messages"]` to LLM (default behavior)
+- **Never mid-run:** Summarization runs in its own node BEFORE the action node, as part of the same sequential graph flow. It cannot interrupt an action LLM call.
+- **Graph flow update:** `validate_inputs → summarize_context → [route_to_action] → {action} → format_response`
 
-**Test:** 20+ message conversation → still coherent responses without context overflow
+**Test:** 20+ message conversation → "Summarizing conversation..." indicator appears briefly → then action runs → coherent response without context overflow. Short conversations (<15 msgs) → no indicator, no latency.
 
 ---
 
@@ -242,15 +562,20 @@
 
 ## Key Decisions
 
-1. **Retrieval service is shared** — one RPC function + Python wrapper used by all 4 actions with different parameters
-2. **Perplexity-style grouped citation bubbles** — LLM outputs `[N]` markers, frontend groups consecutive markers into clickable bubbles that highlight text + filter sources panel. Uses React Context to bridge ChatPanel↔SourcesPanel across route boundary
-3. **Markdown for all responses** — `react-markdown` handles tables, lists, bold, etc. natively
-4. **Confidence + cost persisted in AIMessage metadata** — history reload shows same badges
-5. **Manual summarization over langmem** — langmem incompatible with langgraph 1.0.7 (see Research §4)
-6. **Supabase RPC function** — server-side SQL for vector search (standard Supabase pattern)
-7. **LangSmith is nearly free** — auto-traces all ChatOpenAI calls; just needs env var fix + `@traceable` on services
-8. **`extract_themes()` is shared** — Compare holistic + Audit policy mode both use the same theme extraction helper (DRY)
-9. **Compare table capped at 3 docs** — more than 3 columns makes tables unreadable in chat. 4+ docs → paragraph format automatically
+1. **Retrieval service is shared** — one RPC function (`match_chunks`) + one positional query (`stratified_sample`) + Python wrapper. All 4 actions use different strategies but share the service.
+2. **Perplexity-style grouped citation bubbles** — LLM outputs `[N]` markers, frontend groups consecutive markers into clickable bubbles that highlight text + filter sources panel. Uses React Context to bridge ChatPanel↔SourcesPanel across route boundary.
+3. **Markdown for all responses** — `react-markdown` handles tables, lists, bold, etc. natively.
+4. **Confidence + cost persisted in AIMessage `additional_kwargs`** — `format_response` embeds `retrieval_confidence`, `cost_usd`, `tokens_used`, `citations`, `action` into the AIMessage. History reload shows same badges without re-computation.
+5. **Manual summarization as dedicated graph node** — langmem incompatible with langgraph 1.0.7. `summarize_context` node enables SSE indicator + guarantees no mid-run summarization (see Research §4).
+6. **Supabase RPC function** — for semantic search. Positional queries use standard Supabase table queries (stratified sampling).
+7. **LangSmith is nearly free** — auto-traces all ChatOpenAI calls; just needs env var fix + `@traceable` on services.
+8. **`extract_themes()` is shared** — Compare holistic + Audit policy mode both use the same sync theme extraction helper (DRY).
+9. **Compare table capped at 3 docs** — more than 3 columns makes tables unreadable in chat. 4+ docs → paragraph format automatically.
+10. **All services are SYNC** — graph nodes are `def` (sync). Tavily uses sync `TavilyClient`. Theme/retrieval/web services are all sync. No async/sync mismatch.
+11. **`LLMService.invoke_structured()` returns `LLMResult(parsed, tokens_used, cost_usd)`** — uses `include_raw=True` to get AIMessage usage metadata alongside Pydantic output. All callers updated to destructure.
+12. **Compare mode via mini-LLM classification** — GPT-4o-mini classifies focused vs holistic + extracts topic. More reliable than text-length heuristic, costs ~$0.001.
+13. **Audit mode via `doc_type` from database** — deterministic: `company_policy` doc = source (policy mode), all `regulatory_source` = text mode. No LLM needed for detection.
+14. **Citations stored as dicts in state** — action nodes call `.model_dump()` on Pydantic `Citation` objects before writing to `AgentState`. Prevents LangGraph checkpoint serialization errors.
 
 ---
 ---
@@ -355,14 +680,27 @@ We start at **0.5** and let the confidence scorer classify quality:
 
 #### b) Stratified Sampling (Summarize)
 **Goal:** Representative spread of entire document, not just semantically similar chunks.
+
+**CRITICAL: This does NOT use `match_chunks` RPC.** Stratified sampling is positional, not semantic. It queries the `chunks` table directly by `chunk_index`.
+
+**Implementation — `retrieval_service.stratified_sample()`:**
 - For each resolved document:
-  1. Get total `chunk_count` from the `documents` table
-  2. Divide chunk_indexes into N strata (e.g., chunk_count / 4)
-  3. From each stratum, fetch 3-4 chunks using Supabase query (ORDER BY chunk_index)
-  4. Total: ~15-20 chunks spread evenly across document sections
-- This is a **positional** strategy, NOT semantic search — avoids bias toward repetitive topics
-- Optionally: if user included a specific topic ("summarize the capital section"), combine stratified + semantic (use match_chunks within each stratum)
-- Confidence: always "high" for stratified (we're sampling the full doc)
+  1. Query total chunk count: `SELECT COUNT(*) FROM chunks WHERE document_id = X AND user_id = Y`
+  2. Compute strata boundaries: divide `[0, chunk_count)` into 4 equal bands
+  3. From each band, select 3-4 evenly spaced chunks by index:
+     ```sql
+     SELECT id, document_id, chunk_index, page, content
+     FROM chunks
+     WHERE document_id = :doc_id AND user_id = :user_id
+       AND chunk_index >= :band_start AND chunk_index < :band_end
+     ORDER BY chunk_index
+     LIMIT 4
+     ```
+  4. Total: ~12-16 chunks per doc, spread evenly across intro, body, and conclusion
+- **Why not `match_chunks`?** Semantic search is biased — if a doc repeats "capital requirements" in 50 chunks, semantic search returns all 50. Stratified ensures we capture every section: governance, reporting, penalties, etc.
+- **Multi-doc:** Run stratified sampling per document independently, then combine
+- Confidence: always "high" for stratified (we're sampling the full document, not hoping for semantic relevance)
+- **Supabase call:** Use `.from_("chunks").select("*").eq("document_id", doc_id).eq("user_id", user_id).gte("chunk_index", start).lt("chunk_index", end).order("chunk_index").limit(4).execute()` — standard Supabase table query, no RPC needed
 
 #### c) Per-doc Targeted (Compare)
 **Goal:** Get comparable chunks from each document for the same topic.
@@ -402,14 +740,16 @@ pip install tavily-python
 
 **Environment variable:** `TAVILY_API_KEY` (add to `.env` and `config.py`)
 
-### Usage Pattern (Async)
+### Usage Pattern (Sync — matches our sync graph nodes)
+
+All graph nodes are `def` (sync). Tavily provides a sync `TavilyClient` alongside its async variant. We use the sync client to avoid async/sync mismatch.
 
 ```python
-from tavily import AsyncTavilyClient
+from tavily import TavilyClient
 
-client = AsyncTavilyClient(api_key=settings.tavily_api_key)
+client = TavilyClient(api_key=settings.tavily_api_key)
 
-response = await client.search(
+response = client.search(
     query="Bank Negara capital adequacy requirements 2024",
     search_depth="basic",          # "basic" = 1 credit, "advanced" = 2 credits
     max_results=5,                 # 0-20, default 5
@@ -440,10 +780,11 @@ response = await client.search(
 ### Integration Plan
 
 - New service: `backend/app/services/tavily_service.py`
-- Single function: `async def web_search(query: str, max_results: int = 5) -> list[dict]`
+- Single function: `def web_search(query: str, max_results: int = 5) -> list[dict]` (sync — matches sync nodes)
 - Returns normalized results: `[{ title, url, content, score }]`
 - Called conditionally in action nodes when `state["enable_web_search"] == True`
 - Results stored in `state["web_search_results"]` and converted to citations with `source_type: "web"`
+- **Config fix required:** Add `tavily_api_key: str = ""` to `Settings` in `config.py` (optional field — empty default so app doesn't crash without it). Add `TAVILY_API_KEY` to `.env`.
 
 ### Cost: 1 credit per basic search (1,000 free credits/month)
 
@@ -461,9 +802,9 @@ response = await client.search(
 1. **Single responsibility:** Each node does one logical task. Our action nodes: retrieve → generate → format.
 2. **Return only changed fields:** Return a dict of only the state fields that changed. The reducer handles merging.
 3. **Pure functions:** `def action_node(state: AgentState) -> dict` — read state, do work, return updates.
-4. **Structured output:** Use `LLMService.ainvoke_structured(action, schema, messages)` with Pydantic models for predictable responses.
+4. **Structured output:** Use `LLMService.invoke_structured(action, schema, messages)` (sync) which returns `LLMResult(parsed, tokens_used, cost_usd)`.
 
-### Our Existing Pattern (follow this)
+### Our Existing Pattern (follow this — updated with LLMResult)
 
 ```python
 def action_node(state: AgentState) -> dict:
@@ -479,23 +820,26 @@ def action_node(state: AgentState) -> dict:
     system_prompt = "..."
     context = "\n".join([c["content"] for c in chunks])
 
-    # 4. Call LLM with structured output
-    result = llm_service.invoke_structured("inquire", ResponseSchema, [system, human])
+    # 4. Call LLM — invoke_structured now returns LLMResult(parsed, tokens_used, cost_usd)
+    llm_result = llm_service.invoke_structured("inquire", ResponseSchema, [system, human])
+    result = llm_result.parsed
 
-    # 5. Return changed fields
+    # 5. Return changed fields — citations must be .model_dump() (state expects dicts, not Pydantic)
     return {
         "response": result.response,
-        "citations": [c.dict() for c in result.citations],
+        "citations": [c.model_dump() for c in result.citations],
         "retrieved_chunks": chunks,
         "retrieval_confidence": confidence_tier,
-        "tokens_used": ...,
-        "cost_usd": ...,
+        "tokens_used": llm_result.tokens_used,
+        "cost_usd": llm_result.cost_usd,
     }
 ```
 
 ### Structured Output with LLMService
 
-Our `LLMService.invoke_structured()` uses `ChatOpenAI.with_structured_output(schema)` internally. This forces the LLM to return JSON matching our Pydantic model — no parsing needed.
+Our `LLMService.invoke_structured()` uses `ChatOpenAI.with_structured_output(schema, include_raw=True)` internally. Returns `LLMResult(parsed=PydanticModel, tokens_used=int, cost_usd=float)`.
+
+**IMPORTANT — Citations type transition:** `AgentState.citations` is typed as `list[dict]`. Action nodes MUST call `.model_dump()` on Pydantic `Citation` objects before writing to state. Forgetting this causes serialization errors in LangGraph checkpointing.
 
 Each action defines its own response Pydantic model:
 - `InquireResponse`: `response: str, citations: list[Citation]`
@@ -503,17 +847,58 @@ Each action defines its own response Pydantic model:
 - `CompareResponse`: `comparison_table: list[ComparisonRow], summary: str, citations: list[Citation]`
 - `AuditResponse`: `overall_status: str, findings: list[AuditFinding], summary: str`
 
-### Cost Tracking (Already Built)
+### Cost Tracking — CRITICAL FIX NEEDED
 
-`LLMService` already logs cost per call. Action nodes just need to accumulate:
+**Bug discovered:** `invoke_structured()` uses `with_structured_output(schema)` which returns a Pydantic model — NOT an `AIMessage`. The current `_log_usage()` tries `getattr(result, "usage_metadata")` on the Pydantic model, gets `None`, and silently returns. **Cost has never been logged for structured calls.**
+
+**Fix:** Use LangChain's `include_raw=True` option on `with_structured_output()`. This returns `{"raw": AIMessage, "parsed": PydanticModel}` — giving us both the validated object AND the usage metadata.
+
+**Implementation (modify `invoke_structured` in `llm_service.py`):**
+1. Change: `llm.with_structured_output(schema)` → `llm.with_structured_output(schema, include_raw=True)`
+2. `raw_result = structured.invoke(messages)` → now returns dict, not Pydantic
+3. Extract: `parsed = raw_result["parsed"]`, `raw_msg = raw_result["raw"]`
+4. Log + return usage: `self._log_usage(action_type, model_name, raw_msg)` (now gets real metadata)
+5. **Return a `LLMResult` NamedTuple** with `(parsed, tokens_used, cost_usd)` instead of just the Pydantic model
 
 ```python
-result = llm_service.invoke_structured(...)
-# Cost is already logged internally by LLMService
-# We extract usage from the AIMessage.usage_metadata
+class LLMResult(NamedTuple):
+    parsed: Any       # the Pydantic model instance
+    tokens_used: int  # total tokens (input + output)
+    cost_usd: float   # calculated from model pricing
 ```
 
-The `cost_usd` and `tokens_used` fields in AgentState get set by action nodes and flow through to `format_response` → SSE → frontend.
+**Caller update (3 existing files):** `intent_resolver.py`, `doc_resolver.py`, `validate_inputs.py` change from:
+```python
+result = llm_service.invoke_structured("intent", Schema, msgs)
+result.action  # direct attribute access
+```
+to:
+```python
+llm_result = llm_service.invoke_structured("intent", Schema, msgs)
+result = llm_result.parsed
+result.action  # same attribute access via .parsed
+# llm_result.tokens_used, llm_result.cost_usd available but unused in these nodes
+```
+
+**Action nodes** accumulate cost naturally:
+```python
+llm_result = llm_service.invoke_structured("inquire", InquireResponse, msgs)
+result = llm_result.parsed
+return {
+    "response": result.response,
+    "citations": [c.model_dump() for c in result.citations],
+    "tokens_used": llm_result.tokens_used,
+    "cost_usd": llm_result.cost_usd,
+}
+```
+
+**Multi-LLM-call nodes** (Compare holistic, Audit policy) sum costs across calls:
+```python
+theme_result = llm_service.invoke_structured("compare", ThemeSchema, msgs1)
+report_result = llm_service.invoke_structured("compare", ReportSchema, msgs2)
+total_tokens = theme_result.tokens_used + report_result.tokens_used
+total_cost = theme_result.cost_usd + report_result.cost_usd
+```
 
 ---
 
@@ -557,38 +942,41 @@ Step 5: Pass to action LLM
     - Token savings: ~77% for 50+ message conversations
 ```
 
-### Implementation: Helper function, not a graph node
+### Implementation: Dedicated graph node (revised)
 
-Instead of a separate node in the graph (which would add latency even for short conversations), we implement a helper function called by each action node:
+**Original plan:** helper function inside action nodes. **Revised:** dedicated `summarize_context` graph node.
 
-```python
-# In backend/app/services/context_service.py
+**Why the change:** The user needs a visible SSE indicator ("Summarizing conversation...") when summarization happens. Our SSE system emits per-node via `NODE_STATUS_MAP`. A helper function inside an action node has no SSE visibility — the user would see "Researching your question..." with no explanation for the delay. A dedicated node naturally slots into the existing indicator system.
 
-def prepare_messages_for_llm(state: AgentState) -> tuple[list[BaseMessage], dict]:
-    """
-    Returns (messages_for_llm, state_updates).
-    If conversation is short, returns all messages + empty updates.
-    If long, summarizes old messages and returns windowed list + updated summary.
-    """
-    messages = state.get("messages") or []
-    existing_summary = state.get("conversation_summary") or ""
-
-    if len(messages) <= 15:
-        return messages, {}
-
-    # Window: last 10 messages
-    recent = messages[-10:]
-    old = messages[:-10]
-
-    # Check if summary is stale (covers fewer messages than old count)
-    if not existing_summary or _summary_is_stale(existing_summary, len(old)):
-        summary = _generate_summary(old, existing_summary)
-        return [SystemMessage(content=f"Conversation summary: {summary}")] + recent, {
-            "conversation_summary": summary
-        }
-
-    return [SystemMessage(content=f"Conversation summary: {existing_summary}")] + recent, {}
+**Graph flow change:**
 ```
+validate_inputs → summarize_context → [route_to_action] → {action} → format_response
+```
+
+**Node: `backend/app/graph/nodes/summarize_context.py`**
+```python
+def summarize_context(state: AgentState) -> dict:
+    messages = state.get("messages") or []
+    if len(messages) <= 15:
+        return {}  # instant pass-through, no SSE indicator shown
+
+    existing_summary = state.get("conversation_summary") or ""
+    if existing_summary and not _summary_is_stale(existing_summary, len(messages)):
+        return {}  # cached summary still fresh
+
+    old = messages[:-10]
+    summary = llm_service.invoke_structured("intent", SummarySchema, [...])
+    return {"conversation_summary": summary.parsed.text}
+```
+
+**Action nodes** read summary inline (3 lines, no helper needed):
+```python
+summary = state.get("conversation_summary")
+messages = state.get("messages") or []
+llm_messages = [SystemMessage(f"Summary: {summary}")] + messages[-10:] if summary else messages
+```
+
+**Safety guarantee:** Summarization runs in its own node BEFORE the action node. It is part of the sequential graph flow — it cannot interrupt or overlap with an action LLM call.
 
 ### State Change
 
@@ -597,12 +985,18 @@ Add to `AgentState`:
 conversation_summary: str  # cached rolling summary of old messages
 ```
 
-### Why NOT a separate graph node
+### NODE_STATUS_MAP addition
+```python
+"summarize_context": "Summarizing conversation..."
+```
 
-- Short conversations (90% of usage) would pass through an unnecessary node
-- Action nodes already read messages — they can call the helper inline
-- No graph topology change needed
-- The helper is a pure function — easy to test
+### Why a separate graph node (revised reasoning)
+
+- **SSE visibility:** Only way to show "Summarizing conversation..." indicator to the user
+- **Short conversations pass through instantly:** `if len(messages) <= 15: return {}` — negligible latency
+- **Never mid-run:** Sequential node execution guarantees summarization finishes before action starts
+- **Clean separation:** Summarization logic isolated from action logic
+- **No frontend changes:** `PalReasoning` already renders any `status.message` from `StatusEvent`
 
 ---
 
@@ -727,30 +1121,28 @@ Step 3: Render each segment:
 ### Frontend: State Management
 
 ```
-DashboardShell (orchestrator)
+CitationProvider (wraps DashboardShell children)
   ├── state: activeCitations: Citation[]           — all citations from active message
   ├── state: highlightedGroup: CitationGroup | null — which group is clicked
-  ├── state: sourcesCollapsed: boolean
+  ├── state: sourcesCollapsed: boolean             — moved here from DashboardShell
+  ├── auto-expand: useEffect watches activeCitations (0→N = expand)
   │
-  ├── ChatPanel (center)
-  │     ├── calls onCitationChange(citations, null) when new AI message arrives
-  │     ├── calls onCitationChange(citations, group) when bubble clicked
-  │     └── renders CitedMarkdown with highlightedGroup for CSS class
+  ├── ChatPanel (center) — consumes context
+  │     ├── calls setActiveCitations(citations) on new AI response
+  │     ├── calls setHighlightedGroup(group) on bubble click
+  │     └── renders CitedMarkdown (reads highlightedGroup from context)
   │
-  └── SourcesPanel (right)
-        ├── receives: activeCitations, highlightedGroup
+  └── SourcesPanel (right) — consumes context
+        ├── reads: activeCitations, highlightedGroup, sourcesCollapsed, toggleSources
         ├── if highlightedGroup is null → render all citations
         └── if highlightedGroup set → render only highlightedGroup.citationIds
 ```
 
-**DashboardShell changes needed:**
-- Add `activeCitations`, `highlightedGroup` state
-- Add `onCitationChange` callback (passed to ChatPanel as prop via route children pattern)
-- Pass citation state to SourcesPanel
-- Auto-expand SourcesPanel when citations arrive (if collapsed)
+**DashboardShell becomes a thin layout wrapper** — wraps children in `<CitationProvider>`. No citation or panel-collapse state of its own.
 
-**Problem: ChatPanel is rendered as `children` in the route layout, not as a direct child of DashboardShell.**
-**Solution:** Use React Context. Create a `CitationContext` provider in DashboardShell that ChatPanel consumes. This avoids prop drilling through the route layer.
+**Why Context over props:** ChatPanel is rendered as `children` in the route layout, not a direct child of DashboardShell. Context avoids prop drilling through the route boundary.
+
+**Why `sourcesCollapsed` in Context (not DashboardShell):** A component can't consume a context it provides. The auto-expand logic needs to watch `activeCitations` and set `sourcesCollapsed` — both must be in the same scope. Putting both in the Provider is the cleanest solution.
 
 ```typescript
 // context/citation-context.ts
@@ -759,6 +1151,8 @@ type CitationContextValue = {
   highlightedGroup: CitationGroup | null;
   setActiveCitations: (citations: Citation[]) => void;
   setHighlightedGroup: (group: CitationGroup | null) => void;
+  sourcesCollapsed: boolean;
+  toggleSources: () => void;
 };
 ```
 
@@ -791,11 +1185,11 @@ Compare (holistic) and Audit (policy mode) both need theme extraction from docum
 ```python
 # backend/app/services/theme_service.py
 
-async def extract_themes(chunks: list[dict], max_themes: int = 5) -> list[str]:
+def extract_themes(chunks: list[dict], max_themes: int = 5) -> list[str]:
     """
     Given sampled chunks from one or more documents, extract 3-5 key themes.
     Used by: Compare holistic mode, Audit policy mode.
-    Model: GPT-4o-mini (classification task, cheap).
+    Model: GPT-4o-mini (classification task, cheap). Sync — matches sync nodes.
     Returns: ["Capital requirements", "Reporting obligations", "Penalties", ...]
     """
 ```
@@ -806,7 +1200,37 @@ async def extract_themes(chunks: list[dict], max_themes: int = 5) -> list[str]:
 
 ---
 
-## §6. New Dependencies to Install
+## §6. Web Search Detection Architecture
+
+**Already built** — no changes needed. Documented here for context when implementing action nodes.
+
+### 3-Layer OR Detection (intent_resolver)
+
+| Layer | Signal | Cost | How |
+|-------|--------|------|-----|
+| **Explicit** | Frontend `@Web Search` tag | Free | `enable_web_search: true` in ChatRequest |
+| **Keyword scan** | Temporal words in message | Free | Regex: `latest\|recent\|current\|now\|today\|still\|2025\|2026` |
+| **LLM** | Nuanced phrasing | Already paid | `enable_web_search: bool` in IntentClassification structured output |
+
+`final_flag = frontend OR keyword OR llm_detection`
+
+**Cleanup:** `validate_inputs` drops the flag if `action == "compare"` (comparing documents vs web = meaningless).
+
+### Important: Query Generation Lives in Action Nodes
+
+`intent_resolver` only decides **IF** web search happens. The action node generates **WHAT to search** — it has the full context (resolved docs + user question + action type) to craft a precise query. This is why `web_search_query` is set inside each action node, not during intent resolution.
+
+### Design Rationale
+
+OR logic favors recall over precision — better to run 1 unnecessary Tavily search ($0.001) than miss time-sensitive information and give an outdated compliance answer (high-stakes error).
+
+### Known Gap (v1.1)
+
+No automatic fallback to web search when retrieval confidence is low. MVP: web search is only triggered by the 3-layer detection above.
+
+---
+
+## §7. New Dependencies to Install
 
 ### Backend (`pip install`)
 - `tavily-python` — Tavily web search SDK
@@ -821,7 +1245,7 @@ async def extract_themes(chunks: list[dict], max_themes: int = 5) -> list[str]:
 
 ---
 
-## §7. LangSmith Observability
+## §8. LangSmith Observability
 
 **Sources:**
 - https://docs.langchain.com/langsmith/trace-with-langgraph
@@ -887,13 +1311,13 @@ For non-LangChain functions (our retrieval and web search services), use the `@t
 from langsmith import traceable
 
 @traceable(run_type="retrieval", name="search_chunks")
-async def search_chunks(query, user_id, doc_ids, k, threshold):
-    # ... pgvector search
+def search_chunks(query, user_id, doc_ids, k, threshold):
+    # ... pgvector search (sync)
     pass
 
 @traceable(run_type="tool", name="tavily_web_search")
-async def web_search(query, max_results=5):
-    # ... Tavily API call
+def web_search(query, max_results=5):
+    # ... Tavily API call (sync)
     pass
 ```
 
@@ -912,3 +1336,81 @@ Once activated, we can use these views at smith.langchain.com:
 
 - **Developer plan (free):** 5,000 traces/month — sufficient for our development + demo
 - No payment needed for portfolio project usage
+
+---
+
+## §9. Prompt Engineering for PolicyPal Action Nodes
+
+**Sources:**
+- https://www.getmaxim.ai/articles/a-practitioners-guide-to-prompt-engineering-in-2025/
+- https://articles.chatnexus.io/knowledge-base/advanced-prompt-engineering-for-rag-applications/
+- https://thomas-wiegold.com/blog/prompt-engineering-best-practices-2026/
+
+### Core Prompt Structure (use for every action node)
+
+Every system prompt follows this order — **most critical instructions first and last** (model attention degrades in the middle):
+
+```
+1. ROLE        — Who the model is and what it's doing
+2. CONTEXT     — Retrieved chunks with metadata (source, page, doc title)
+3. TASK        — The specific job for this call (one clear objective)
+4. RULES       — Hard constraints: cite only from context, use [N] markers, no hallucination
+5. FORMAT      — Exact output schema (matches Pydantic model fields)
+```
+
+### Prompt Length Target
+
+- **System prompt: 150–250 words max.** Performance degrades past ~3,000 tokens total context from instructions alone. Keep prompts tight — context (retrieved chunks) consumes the token budget.
+- **No preamble.** Start with the role, not "You are a helpful assistant that can..."
+- **No repetition.** Each rule stated once. Trust the model.
+
+### RAG-Specific Rules (include in every action prompt)
+
+These lines must appear in every action node system prompt:
+```
+- Answer ONLY using the provided context. Do not use prior knowledge.
+- Place citation markers [1], [2], etc. immediately after the claim they support.
+- Multiple sources for one claim: write [1][2] together (no space).
+- If the context does not answer the question, say so explicitly.
+- Quote the exact source text in the `quote` field of each citation.
+```
+
+### Context Block Format
+
+Pass retrieved chunks as structured text, not raw concatenation. Include metadata so the model can build accurate citations:
+
+```
+[1] Source: Bank Negara Policy Document 2024 | Page: 12
+"The minimum capital adequacy ratio shall not fall below 8% at any time..."
+
+[2] Source: FSA Regulations 2023 | Page: 45
+"All licensed institutions must submit quarterly capital reports..."
+```
+
+### User Context Injection
+
+Append to system prompt when profile data exists:
+```
+User context: Works in {industry} in {location}. Tailor regulatory references and examples to their jurisdiction.
+```
+Omit the whole line if profile is empty — never leave `{industry}` as a literal placeholder.
+
+### Action-Specific Prompt Notes
+
+| Action | Key instruction | Model |
+|--------|----------------|-------|
+| **Inquire** | "Answer the specific question concisely. Cite every factual claim." | GPT-4o-mini |
+| **Summarize** | "Produce a structured summary. Each section corresponds to a document region. Do not merge unrelated sections." | GPT-4o-mini |
+| **Compare (focused)** | "Output a markdown table only. Columns = documents. Rows = aspects of '{topic}'." | GPT-4o-mini |
+| **Compare (holistic)** | "Write a 5-section report. Sections: Overview, Key Differences, Similarities, Unique Aspects, Implications." | GPT-4o |
+| **Audit** | "For each finding, assign severity (Critical/High/Medium/Low) and provide a specific remediation suggestion. Ground every finding in an exact source quote." | GPT-4o |
+| **Theme extraction** | "Extract 3–5 distinct regulatory themes. Output a JSON array of short strings only. No explanation." | GPT-4o-mini |
+| **Compare intent** | "Classify the request as 'focused' or 'holistic'. If focused, extract the exact comparison topic as a short phrase." | GPT-4o-mini |
+
+### Anti-Patterns to Avoid
+
+- **Context dumping** — Never pass raw concatenated chunks without source labels. The model cannot cite what it can't identify.
+- **Vague output instructions** — "Summarize the document" → bad. "Produce a summary with: 1 paragraph overview, 3–5 bullet key points, 1 sentence conclusion" → good.
+- **Contradictory rules** — Don't say "be concise" and "include all details" in the same prompt.
+- **Floating placeholders** — Always check `{variable}` substitutions before sending. Empty placeholders confuse the model.
+- **Restating the schema** — With `with_structured_output(Schema)`, the Pydantic schema IS the format instruction. Don't re-describe it in the prompt — wastes tokens.

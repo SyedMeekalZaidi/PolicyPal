@@ -12,11 +12,14 @@ import traceback
 import uuid
 from typing import Optional
 
+import langsmith as ls
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tracers.langchain import LangChainTracer
 from langgraph.types import Command
 
+from app.config import get_settings
 from app.models.schemas import (
     NODE_STATUS_MAP,
     ChatHistoryMessage,
@@ -33,6 +36,25 @@ from app.services.supabase_client import get_supabase
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _make_graph_config(thread_id: str, run_name: str = "policypal-chat") -> dict:
+    """
+    Build the LangGraph run config with an explicit LangChainTracer.
+
+    Injecting the tracer explicitly guarantees every graph run appears in
+    LangSmith regardless of whether env-var-based auto-tracing initialised
+    correctly. Each request gets its own tracer instance so concurrent
+    conversations appear as separate traces.
+    """
+    settings = get_settings()
+    callbacks = []
+    if settings.langsmith_tracing.lower() == "true" and settings.langsmith_api_key:
+        callbacks.append(LangChainTracer(project_name=settings.langsmith_project))
+    config: dict = {"configurable": {"thread_id": thread_id}, "run_name": run_name}
+    if callbacks:
+        config["callbacks"] = callbacks
+    return config
 
 # SSE headers required for correct browser + proxy behaviour.
 # Content-Encoding: none prevents Next.js / Nginx from gzip-buffering the stream,
@@ -134,100 +156,102 @@ async def _stream_graph(input_or_command, config: dict, user_id: str = ""):
     """
     graph = await get_compiled_graph()
     response_yielded = False
+    settings = get_settings()
 
-    try:
-        async for chunk in graph.astream(input_or_command, config, stream_mode="updates"):
+    # tracing_context forces every graph run into LangSmith regardless of env-var
+    # detection edge cases. This is the guaranteed path per LangSmith docs.
+    with ls.tracing_context(
+        enabled=settings.langsmith_tracing.lower() == "true",
+        project_name=settings.langsmith_project,
+    ):
+        try:
+            async for chunk in graph.astream(input_or_command, config, stream_mode="updates"):
 
-            # ── Inline interrupt detection (primary path) ────────────────────
-            # When a node calls interrupt(), LangGraph emits a chunk whose only
-            # key is "__interrupt__".  Detect it here before the inner loop so
-            # we never try to look it up in NODE_STATUS_MAP.
-            if "__interrupt__" in chunk:
-                interrupts = chunk["__interrupt__"]
-                if interrupts:
-                    logger.info(
-                        "_stream_graph | __interrupt__ chunk detected, thread=%s",
-                        config.get("configurable", {}).get("thread_id"),
+                # ── Inline interrupt detection (primary path) ────────────────────
+                # When a node calls interrupt(), LangGraph emits a chunk whose only
+                # key is "__interrupt__".  Detect it here before the inner loop so
+                # we never try to look it up in NODE_STATUS_MAP.
+                if "__interrupt__" in chunk:
+                    interrupts = chunk["__interrupt__"]
+                    if interrupts:
+                        logger.info(
+                            "_stream_graph | __interrupt__ chunk detected, thread=%s",
+                            config.get("configurable", {}).get("thread_id"),
+                        )
+                        yield _yield_interrupt(interrupts[0].value)
+                    return  # Stream ends — graph is paused
+
+                # ── Normal node update processing ────────────────────────────────
+                for node_name, updates in chunk.items():
+                    # Skip internal LangGraph bookkeeping nodes (e.g. __start__)
+                    if node_name not in NODE_STATUS_MAP:
+                        continue
+
+                    # Some nodes return None instead of a dict when they write no keys
+                    if updates is None:
+                        updates = {}
+
+                    # Emit a StatusEvent for every known node
+                    status = StatusEvent(
+                        node=node_name,
+                        message=NODE_STATUS_MAP[node_name],
+                        docs_found=None,
+                        web_query=None,
                     )
-                    yield _yield_interrupt(interrupts[0].value)
-                return  # Stream ends — graph is paused
 
-            # ── Normal node update processing ────────────────────────────────
-            for node_name, updates in chunk.items():
-                # Skip internal LangGraph bookkeeping nodes (e.g. __start__)
-                if node_name not in NODE_STATUS_MAP:
-                    continue
+                    # Enrich doc_resolver status with resolved document pills
+                    if node_name == "doc_resolver":
+                        resolved = updates.get("resolved_doc_ids") or []
+                        if resolved and user_id:
+                            status.docs_found = _get_doc_titles_for_status(resolved, user_id)
 
-                # Some nodes return None instead of a dict when they write no keys
-                if updates is None:
-                    updates = {}
+                    # Enrich any action node that performed web search
+                    if updates.get("web_search_query"):
+                        status.web_query = updates["web_search_query"]
 
-                # Emit a StatusEvent for every known node
-                status = StatusEvent(
-                    node=node_name,
-                    message=NODE_STATUS_MAP[node_name],
-                    docs_found=None,
-                    web_query=None,
+                    yield _sse(status)
+
+                    # After format_response, read final state and emit ChatResponse
+                    if node_name == "format_response":
+                        final_state = await graph.aget_state(config)
+                        vals = final_state.values
+                        yield _sse(ChatResponse(
+                            response=vals.get("response") or "",
+                            citations=vals.get("citations") or [],
+                            action=vals.get("action") or "inquire",
+                            inference_confidence=vals.get("inference_confidence") or "low",
+                            retrieval_confidence=vals.get("retrieval_confidence") or "low",
+                            tokens_used=vals.get("tokens_used") or 0,
+                            cost_usd=vals.get("cost_usd") or 0.0,
+                        ))
+                        response_yielded = True
+                        return  # Stream complete
+
+            # ── Post-loop safety net ─────────────────────────────────────────────
+            # Catches any interrupt that didn't appear as an inline "__interrupt__"
+            # chunk (e.g. LangGraph version differences or ordering edge cases).
+            if not response_yielded:
+                state = await graph.aget_state(config)
+                for task in (state.tasks or []):
+                    interrupts = getattr(task, "interrupts", ())
+                    if interrupts:
+                        logger.info(
+                            "_stream_graph | interrupt detected via post-loop state.tasks, thread=%s",
+                            config.get("configurable", {}).get("thread_id"),
+                        )
+                        yield _yield_interrupt(interrupts[0].value)
+                        return
+
+                # No interrupt and no response — unexpected graph state
+                logger.error(
+                    "Stream ended without response or interrupt. thread_id=%s",
+                    config.get("configurable", {}).get("thread_id"),
                 )
+                yield _sse_error("Graph completed without producing a response.")
 
-                # Enrich doc_resolver status with resolved document pills
-                if node_name == "doc_resolver":
-                    resolved = updates.get("resolved_doc_ids") or []
-                    if resolved and user_id:
-                        status.docs_found = _get_doc_titles_for_status(resolved, user_id)
-
-                # Enrich any action node that performed web search
-                if updates.get("web_search_query"):
-                    status.web_query = updates["web_search_query"]
-
-                yield _sse(status)
-
-                # After format_response, read final state and emit ChatResponse
-                if node_name == "format_response":
-                    final_state = await graph.aget_state(config)
-                    vals = final_state.values
-                    yield _sse(ChatResponse(
-                        response=vals.get("response", ""),
-                        citations=vals.get("citations", []),
-                        action=vals.get("action", "inquire"),
-                        # Default "low" — unknown confidence should surface as cautious, not falsely certain
-                        inference_confidence=vals.get("inference_confidence") or "low",
-                        retrieval_confidence=vals.get("retrieval_confidence") or "low",
-                        tokens_used=vals.get("tokens_used", 0),
-                        cost_usd=vals.get("cost_usd", 0.0),
-                    ))
-                    response_yielded = True
-                    return  # Stream complete
-
-        # ── Post-loop safety net ─────────────────────────────────────────────
-        # Catches any interrupt that didn't appear as an inline "__interrupt__"
-        # chunk (e.g. LangGraph version differences or ordering edge cases).
-        #
-        # Payload contract (Phase 3.1):
-        #   interrupt({"interrupt_type": "...", "message": "...", "options": [...]})
-        #   → InterruptResponse(type="interrupt", interrupt_type=..., ...)
-        if not response_yielded:
-            state = await graph.aget_state(config)
-            for task in (state.tasks or []):
-                interrupts = getattr(task, "interrupts", ())
-                if interrupts:
-                    logger.info(
-                        "_stream_graph | interrupt detected via post-loop state.tasks, thread=%s",
-                        config.get("configurable", {}).get("thread_id"),
-                    )
-                    yield _yield_interrupt(interrupts[0].value)
-                    return
-
-            # No interrupt and no response — unexpected graph state
-            logger.error(
-                "Stream ended without response or interrupt. thread_id=%s",
-                config.get("configurable", {}).get("thread_id"),
-            )
-            yield _sse_error("Graph completed without producing a response.")
-
-    except Exception as exc:
-        logger.error("Graph streaming error:\n%s", traceback.format_exc())
-        yield _sse_error(f"An error occurred: {str(exc)}")
+        except Exception as exc:
+            logger.error("Graph streaming error:\n%s", traceback.format_exc())
+            yield _sse_error(f"An error occurred: {str(exc)}")
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +271,26 @@ async def chat(request: ChatRequest):
     """
     _validate_uuid(request.user_id, "user_id")
     _validate_uuid(request.thread_id, "thread_id")
+
+    # Fetch user profile for context injection into action node prompts.
+    # One lightweight query per turn — action nodes tailor jurisdiction-specific answers.
+    # Non-critical: if the fetch fails, empty strings are used gracefully.
+    user_industry = ""
+    user_location = ""
+    try:
+        profile_resp = (
+            get_supabase()
+            .from_("profiles")
+            .select("industry, location")
+            .eq("id", request.user_id)
+            .single()
+            .execute()
+        )
+        if profile_resp.data:
+            user_industry = profile_resp.data.get("industry") or ""
+            user_location = profile_resp.data.get("location") or ""
+    except Exception:
+        logger.warning("chat | profile fetch failed — using empty user context", exc_info=True)
 
     # Build initial state — TRANSIENT fields only.
     # CRITICAL: do NOT include conversation_docs here.
@@ -275,6 +319,8 @@ async def chat(request: ChatRequest):
         "inference_confidence": "",
         "inference_reasoning": None,
         "suggested_doc_ids": [],
+        "clean_query": "",
+        "resolved_doc_titles": {},
         "retrieved_chunks": [],
         "retrieval_confidence": "",
         "confidence_score": 0.0,
@@ -282,9 +328,12 @@ async def chat(request: ChatRequest):
         "citations": [],
         "tokens_used": 0,
         "cost_usd": 0.0,
+        # User context — injected from profiles table, used by action node prompts
+        "user_industry": user_industry,
+        "user_location": user_location,
     }
 
-    config = {"configurable": {"thread_id": request.thread_id}}
+    config = _make_graph_config(request.thread_id)
 
     return StreamingResponse(
         _stream_graph(initial_state, config, user_id=request.user_id),
@@ -314,7 +363,7 @@ async def resume_chat(request: ResumeRequest):
     _validate_uuid(request.user_id, "user_id")
     _validate_uuid(request.thread_id, "thread_id")
 
-    config = {"configurable": {"thread_id": request.thread_id}}
+    config = _make_graph_config(request.thread_id, run_name="policypal-resume")
 
     # Validate that this thread actually has a pending interrupt.
     # Must happen before starting the StreamingResponse (status code would lock).

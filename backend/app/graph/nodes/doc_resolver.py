@@ -199,6 +199,7 @@ def _fuzzy_match(
 def _build_llm_messages(
     conversation_docs: dict[str, str],
     explicit_uuids: list[str],
+    doc_mentions: dict[str, str],
     action: str,
     latest_message: str,
     context_messages: list,
@@ -214,11 +215,11 @@ def _build_llm_messages(
     else:
         registry_block = "(empty — this is the user's first message, no prior documents)"
 
-    # Explicit block
+    # Explicit block — prefer TipTap label (human-readable) over registry/UUID fallback
     if explicit_uuids:
         explicit_lines = [
             f"- UUID: {uid} "
-            f'("{next((t for t, u in conversation_docs.items() if u == uid), uid)}")'
+            f'("{doc_mentions.get(uid) or next((t for t, u in conversation_docs.items() if u == uid), uid)}")'
             for uid in explicit_uuids
         ]
         explicit_block = "\n".join(explicit_lines)
@@ -272,6 +273,8 @@ def doc_resolver(state: AgentState) -> dict:
     # ── Stage 1b: Pure mention shortcut ($0) ──────────────────────────────────
     if _is_pure_mention(free_text) and explicit_uuids:
         logger.info("doc_resolver | pure mention shortcut — skipping LLM")
+        # resolved_doc_titles built directly from TipTap labels — doc_mentions has
+        # {uuid: label} for all @mentioned docs, which is the most accurate source.
         return {
             "resolved_doc_ids": explicit_uuids,
             "inference_source": "explicit",
@@ -281,6 +284,8 @@ def doc_resolver(state: AgentState) -> dict:
             "unresolved_names": [],
             "inference_reasoning": "All documents explicitly @mentioned, no free text.",
             "suggested_doc_ids": [],
+            "clean_query": "",
+            "resolved_doc_titles": {uid: label for uid, label in doc_mentions.items()},
         }
 
     # ── Stage 1c: Determine context scope ─────────────────────────────────────
@@ -302,22 +307,25 @@ def doc_resolver(state: AgentState) -> dict:
         ]
         logger.info("doc_resolver | context=history (%d msgs)", len(context_messages))
 
-    # Latest user message text
-    latest_message_text = free_text or (
-        str(messages[-1].content) if messages else ""
+    # Send full raw message to LLM — includes @mention labels so it can reason
+    # accurately about explicit tags ("user tagged @Muscle Building Guide").
+    # The ALREADY EXPLICITLY TAGGED block in the prompt prevents double-counting.
+    latest_message_text = (
+        str(messages[-1].content) if messages else free_text
     )
 
     # ── Stage 2: LLM call ─────────────────────────────────────────────────────
     llm_messages = _build_llm_messages(
         conversation_docs=conversation_docs,
         explicit_uuids=explicit_uuids,
+        doc_mentions=doc_mentions,
         action=action,
         latest_message=latest_message_text,
         context_messages=context_messages,
     )
 
     llm = get_llm_service()
-    resolution = llm.invoke_structured("doc_resolution", DocResolution, llm_messages)
+    resolution = llm.invoke_structured("doc_resolution", DocResolution, llm_messages).parsed
 
     logger.info(
         "doc_resolver | LLM: resolved=%s unresolved=%s confidence=%s | %s",
@@ -343,6 +351,10 @@ def doc_resolver(state: AgentState) -> dict:
     remaining_unresolved = resolution.unresolved_names
     inference_source = "inferred" if validated_llm_uuids or not explicit_uuids else "explicit"
 
+    # Initialized here so it's always in scope when building resolved_doc_titles below,
+    # even when the fuzzy block never runs (avoids NameError on the title lookup).
+    all_docs: list[dict] = []
+
     if remaining_unresolved and user_id:
         all_docs = _fetch_user_docs(user_id)
         fuzzy_uuids, remaining_unresolved = _fuzzy_match(remaining_unresolved, all_docs)
@@ -351,6 +363,21 @@ def doc_resolver(state: AgentState) -> dict:
             merged_uuids = list(dict.fromkeys(merged_uuids + fuzzy_uuids))
             inference_source = "fuzzy_match"
             logger.info("doc_resolver | fuzzy added %d UUIDs", len(fuzzy_uuids))
+
+    # Build {uuid: title} from data already in memory — zero extra DB calls.
+    # Priority: TipTap label (current turn) → registry (history) → fuzzy DB fetch → UUID fallback.
+    # Must run AFTER the fuzzy block so merged_uuids is fully populated.
+    _uuid_to_title = {v: k for k, v in conversation_docs.items()}
+    _fuzzy_titles = {d["id"]: d["title"] for d in all_docs}
+    resolved_doc_titles: dict[str, str] = {
+        uid: (
+            doc_mentions.get(uid)
+            or _uuid_to_title.get(uid)
+            or _fuzzy_titles.get(uid)
+            or uid
+        )
+        for uid in merged_uuids
+    }
 
     # suggested_doc_ids: LLM's best guesses for PalAssist (medium/low confidence)
     suggested_doc_ids = validated_llm_uuids if resolution.inference_confidence != "high" else []
@@ -365,11 +392,12 @@ def doc_resolver(state: AgentState) -> dict:
         "unresolved_names": remaining_unresolved,
         "inference_reasoning": resolution.reasoning,
         "suggested_doc_ids": suggested_doc_ids,
+        "clean_query": free_text.strip(),
+        "resolved_doc_titles": resolved_doc_titles,
     }
 
     # ── Stage 4: Interrupt gates ───────────────────────────────────────────────
-    # Inverse registry for title lookup: uuid → title
-    _uuid_to_title = {v: k for k, v in conversation_docs.items()}
+    # _uuid_to_title already built above for resolved_doc_titles; reused here.
 
     # Gate 1 — Medium confidence: multiple candidate docs, user must choose
     if resolution.inference_confidence == "medium" and suggested_doc_ids:
@@ -415,8 +443,10 @@ def doc_resolver(state: AgentState) -> dict:
         logger.info("doc_resolver | doc_choice resume=%r → resolved=%s", resume_val, final_ids)
         return {**base_result, "resolved_doc_ids": final_ids, "inference_confidence": "high"}
 
-    # Gate 2 — Low confidence: unresolvable references, user must tag the doc
-    if resolution.inference_confidence == "low" and remaining_unresolved:
+    # Gate 2 — Low confidence: unresolvable references, user must tag the doc.
+    # Skip if explicit tags already gave us documents — unresolved pronouns are
+    # irrelevant when the user has already told us which document(s) to use.
+    if resolution.inference_confidence == "low" and remaining_unresolved and not merged_uuids:
         logger.info(
             "doc_resolver | low confidence, unresolved=%s — interrupting for @tag",
             remaining_unresolved,

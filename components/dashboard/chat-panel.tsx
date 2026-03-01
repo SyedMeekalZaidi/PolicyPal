@@ -11,15 +11,17 @@
 //   response arrives  → isResuming=false, AI message added
 //   cancel            → graph jumps to format_response with feedback message; shown as AI bubble
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, Sparkles } from "lucide-react";
+import { DollarSign, RefreshCw, Sparkles } from "lucide-react";
 import { AnimatePresence } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { JSONContent } from "@tiptap/core";
 
 import { ChatInput } from "@/components/chat/chat-input";
+import { CitedMarkdown } from "@/components/chat/cited-markdown";
 import { PalAssist } from "@/components/chat/pal-assist";
 import { PalReasoning } from "@/components/chat/pal-reasoning";
+import { useCitationContext } from "@/context/citation-context";
 import { useRenameConversation } from "@/hooks/mutations/use-rename-conversation";
 import { chatHistoryQueryKey, useChatHistory } from "@/hooks/queries/use-chat-history";
 import { useChatStream } from "@/hooks/use-chat-stream";
@@ -114,6 +116,9 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const hasAutoTitled = useRef(false);
 
+  // Citation state lives in CitationContext — shared with SourcesPanel across the route boundary
+  const { setActiveCitations, setHighlightedGroup } = useCitationContext();
+
   const rename = useRenameConversation();
   const queryClient = useQueryClient();
 
@@ -131,13 +136,18 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
           ...prev,
           { id: crypto.randomUUID(), role: "assistant", text: event.response, response: event },
         ]);
+
+        // Populate Sources Panel with this message's citations and clear any active highlight
+        setActiveCitations(event.citations ?? []);
+        setHighlightedGroup(null);
+
         // Mark history as stale so the next navigation reloads from checkpoint.
         // refetchType:'none' — just mark stale, do NOT refetch while mounted.
         // Without this, invalidateQueries triggers a background refetch that
         // overwrites client-side messages (PalAssist audit trail, etc.).
         queryClient.invalidateQueries({ queryKey: chatHistoryQueryKey(conversationId), refetchType: "none" });
       },
-      [conversationId, queryClient]
+      [conversationId, queryClient, setActiveCitations, setHighlightedGroup]
     ),
 
     onInterrupt: useCallback((event: InterruptResponse) => {
@@ -164,6 +174,9 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
     setMessages([]);
     setInterruptPayload(null);
     setIsResuming(false);
+    // Clear citation state so Sources Panel resets when switching conversations
+    setActiveCitations([]);
+    setHighlightedGroup(null);
     hasAutoTitled.current = false;
   // chatStream.cancel is stable (useCallback with no deps change), but
   // we intentionally omit it here to avoid a double-cancel on mount.
@@ -338,9 +351,13 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
                 </div>
               ) : (
                 // Assistant bubble — left-aligned, white background
-                <div key={m.id} className="self-start max-w-[75%] flex flex-col gap-1">
-                  <div className="rounded-2xl rounded-bl-md bg-white/80 backdrop-blur-sm border border-white/60 px-3.5 py-2 text-sm text-foreground leading-relaxed">
-                    {m.text}
+                <div key={m.id} className="self-start max-w-[85%] flex flex-col gap-1">
+                  <div className="rounded-2xl rounded-bl-md bg-white/80 backdrop-blur-sm border border-white/60 px-3.5 py-2 text-sm text-foreground">
+                    <CitedMarkdown
+                      content={m.text}
+                      citations={m.response?.citations ?? []}
+                      messageId={m.id}
+                    />
                   </div>
                   {m.response && (
                     <div className="flex items-center gap-1.5 px-1">
@@ -351,8 +368,9 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
                       {m.response.tokens_used > 0 && (
                         <>
                           <span className="text-xs text-muted-foreground">·</span>
+                          <DollarSign className="h-3 w-3 text-muted-foreground" />
                           <span className="text-xs text-muted-foreground">
-                            🪙 {m.response.tokens_used} tokens · ${m.response.cost_usd.toFixed(4)}
+                            {m.response.tokens_used} tokens · ${m.response.cost_usd.toFixed(4)}
                           </span>
                         </>
                       )}

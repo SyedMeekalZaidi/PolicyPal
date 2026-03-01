@@ -11,10 +11,15 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
-    # LangSmith
+    # LangSmith — field names map 1:1 to env var names (case-insensitive).
+    # LANGSMITH_TRACING is the var the SDK reads from os.environ to enable tracing.
     langsmith_api_key: str
-    langsmith_tracing_v2: str = "true"
+    langsmith_tracing: str = "true"
     langsmith_project: str = "policypal"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+
+    # Tavily web search (optional — empty default allows startup without the key)
+    tavily_api_key: str = ""
     
     class Config:
         env_file = ".env"
