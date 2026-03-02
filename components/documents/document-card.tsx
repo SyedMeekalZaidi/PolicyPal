@@ -24,35 +24,32 @@ export function DocumentCard({ doc, onEdit }: Props) {
   const accentColor = DOC_TYPE_ACCENT[doc.doc_type] ?? "#4A9EFF";
   const setColor = doc.sets?.color;
 
-  const cardBg = setColor
-    ? hexToRgba(setColor, 0.09)
-    : "rgba(255, 255, 255, 0.55)";
-
-  const iconBg = hexToRgba(accentColor, 0.15);
+  // Icon tint follows set color; fall back to primary blue when no set assigned
+  const iconColor = setColor ?? "#4A9EFF";
+  const iconBg = hexToRgba(iconColor, 0.15);
 
   return (
     <div
       className={cn(
         "group relative flex items-center gap-3 rounded-xl px-3 py-2.5",
-        "border border-white/70 backdrop-blur-sm",
+        "border border-white/60 bg-white/80 backdrop-blur-sm",
         "shadow-sm shadow-blue-100/40",
-        "transition-all duration-150 hover:shadow-md hover:shadow-blue-100/50 hover:-translate-y-px",
+        "transition-all duration-150 hover:bg-white/90 hover:shadow-md hover:shadow-blue-100/50 hover:-translate-y-px",
         "cursor-default overflow-hidden"
       )}
-      style={{ backgroundColor: cardBg }}
     >
-      {/* Left type accent bar */}
+      {/* Left accent bar — doc type color (gold = regulatory, green = company) */}
       <span
         className="absolute left-0 top-0 bottom-0 w-[3px] rounded-l-xl"
         style={{ backgroundColor: accentColor }}
       />
 
-      {/* File icon with accent tint */}
+      {/* File icon — tinted to match set color */}
       <div
         className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center"
         style={{ backgroundColor: iconBg }}
       >
-        <FileText className="h-4 w-4" style={{ color: accentColor }} />
+        <FileText className="h-4 w-4" style={{ color: iconColor }} />
       </div>
 
       {/* Text: title + type label */}

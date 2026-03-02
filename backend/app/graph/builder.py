@@ -19,11 +19,9 @@ from app.graph.nodes.doc_resolver import doc_resolver
 from app.graph.nodes.format_response import format_response
 from app.graph.nodes.intent_resolver import intent_resolver
 from app.graph.nodes.inquire import inquire_action
-from app.graph.nodes.stub_actions import (
-    audit_action,
-    compare_action,
-    summarize_action,
-)
+from app.graph.nodes.compare import compare_action
+from app.graph.nodes.audit import audit_action
+from app.graph.nodes.summarize import summarize_action
 from app.graph.nodes.validate_inputs import validate_inputs
 from app.graph.state import AgentState
 

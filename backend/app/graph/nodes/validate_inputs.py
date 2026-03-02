@@ -7,16 +7,17 @@
 # this node fetches all ready documents in that set and merges them into
 # resolved_doc_ids before the action node runs.
 #
-# Interrupt gates (Phase 3):
-#   Gate 1: insufficient docs for action  → text_input (tag a doc)
-#   Gate 2: audit with no source text     → text_input (provide audit text)
-#   Gates are elif — mutually exclusive on each pass.
+# Interrupt gate:
+#   Gate 1: insufficient docs for action → text_input (tag a doc)
+#
+# NOTE: Audit Gate 2 (source text validation) lives in audit.py, not here.
+# validate_inputs cannot know whether audit is text mode or policy mode — that
+# determination requires a DB query that only audit_action performs.
 
 import logging
-import re
 import uuid as _uuid_mod
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langgraph.types import Command, interrupt
 
 from app.graph.state import CANCEL_SENTINEL, AgentState
@@ -29,7 +30,7 @@ _DOC_REQUIREMENTS: dict[str, int] = {
     "summarize": 1,
     "inquire": 0,   # can be general knowledge or web-only
     "compare": 2,
-    "audit": 1,     # source text is in the message; needs 1+ target regulation doc
+    "audit": 1,     # always needs 1+ target regulatory doc; source is doc or user text (checked in audit.py)
 }
 
 
@@ -49,25 +50,6 @@ def _fetch_set_doc_ids(set_id: str, user_id: str) -> list[str]:
     except Exception as e:
         logger.error("validate_inputs | set_id fetch failed (set=%s): %s", set_id, e)
         return []
-
-
-def _is_audit_text_missing(state: AgentState) -> bool:
-    """
-    True if the last human message has no substantial free text for auditing.
-
-    Audit requires a policy/email excerpt. If the message is only @mentions
-    (mentions get label text prepended), the remaining text will be very short.
-    Heuristic: strip @word tokens; if < 50 chars remain, treat as missing.
-    """
-    messages = state.get("messages") or []
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            # Strip @mention label tokens (e.g. "Audit", "DocTitle") — these come
-            # from TipTap mention rendering, not the user's actual audit text
-            cleaned = re.sub(r"@\S+", "", content).strip()
-            return len(cleaned) < 50
-    return True
 
 
 def validate_inputs(state: AgentState) -> dict:
@@ -97,9 +79,12 @@ def validate_inputs(state: AgentState) -> dict:
                 result["resolved_doc_ids"] = resolved_doc_ids
 
     # ── Web search cleanup ─────────────────────────────────────────────────────
-    # Compare is always between uploaded docs — web search is meaningless here
-    if action == "compare" and enable_web_search:
-        logger.info("validate_inputs | compare + web_search=True -> dropping web search flag")
+    # These actions operate only on uploaded docs — web search is not applicable
+    if action in ("compare", "summarize", "audit") and enable_web_search:
+        logger.info(
+            "validate_inputs | %s + web_search=True -> dropping web search flag (not applicable)",
+            action,
+        )
         result["enable_web_search"] = False
 
     # ── Action-specific doc count validation ───────────────────────────────────
@@ -111,10 +96,7 @@ def validate_inputs(state: AgentState) -> dict:
         action, actual_docs, min_docs,
     )
 
-    # ── Interrupt gates ────────────────────────────────────────────────────────
-    # Gates are elif — only one fires per pass. Pure Python, no cost on re-run.
-
-    # Gate 1 — Insufficient documents for the action
+    # ── Gate 1 — Insufficient documents for the action ────────────────────────
     if actual_docs < min_docs:
         if action == "compare":
             msg = "Compare requires at least 2 documents. Please @tag the additional document."
@@ -160,33 +142,6 @@ def validate_inputs(state: AgentState) -> dict:
             else:
                 cancel_msg = f"I need a regulation document to run {action.capitalize()}. Please @tag one and try again."
             logger.info("validate_inputs | Gate 1 cancel → stopping with feedback")
-            return Command(
-                update={**result, "response": cancel_msg, "messages": [AIMessage(content=cancel_msg)]},
-                goto="format_response",
-            )
-
-    # Gate 2 — Audit action with no meaningful source text in the message
-    elif action == "audit" and _is_audit_text_missing(state):
-        logger.info("validate_inputs | Gate 2: audit source text missing — interrupting")
-        resume_val = interrupt({
-            "interrupt_type": "text_input",
-            "message": "Please enter the text you'd like to audit (e.g. an email or policy excerpt).",
-            "options": None,
-        })
-        # ── RESUME PATH ONLY ──────────────────────────────────────────────────
-        if resume_val not in (None, CANCEL_SENTINEL):
-            # Append the user's audit text as a new message so action nodes can find it.
-            # add_messages reducer will append this to the conversation history.
-            result["messages"] = [HumanMessage(content=str(resume_val))]
-            logger.info(
-                "validate_inputs | Gate 2 resume: source text added (%d chars)", len(str(resume_val))
-            )
-        else:
-            cancel_msg = (
-                "I need the text you'd like to audit. "
-                "Please include it in your next message along with a @tagged regulation document."
-            )
-            logger.info("validate_inputs | Gate 2 cancel → stopping with feedback")
             return Command(
                 update={**result, "response": cancel_msg, "messages": [AIMessage(content=cancel_msg)]},
                 goto="format_response",

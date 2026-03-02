@@ -228,6 +228,51 @@
   }
 }
 
+/* ── Glassmorphism Scrollbars ───────────────────────────────────────────────
+   Visible but aesthetic — translucent track + frosted thumb that lifts on hover.
+   Applied globally; works in Chrome/Edge/Safari. Firefox uses scrollbar-color fallback.
+*/
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(74, 158, 255, 0.35) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(191, 217, 240, 0.15);
+  border-radius: 999px;
+  margin: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(
+    180deg,
+    rgba(74, 158, 255, 0.45) 0%,
+    rgba(59, 143, 242, 0.35) 100%
+  );
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(4px);
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(
+    180deg,
+    rgba(74, 158, 255, 0.7) 0%,
+    rgba(59, 143, 242, 0.55) 100%
+  );
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* PalReasoning shimmer — gentler than animate-pulse (0.6→1 opacity, slower) */
 @keyframes pal-shimmer {
   0%, 100% { opacity: 1; }

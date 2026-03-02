@@ -65,7 +65,13 @@ INSTRUCTIONS:
 2. For each reference you can match: add its UUID to resolved_uuids.
 3. For each reference you CANNOT match (unknown name, unclear pronoun with no prior context): add the name/phrase to unresolved_names.
 4. Set has_implicit_refs=true if any resolved doc was NOT explicitly @mentioned.
-5. Confidence: high = certain match, medium = probable match, low = guessing or registry is empty.
+5. Confidence measures certainty about DOCUMENT IDENTITY only — not whether the document answers the question.
+   high   = you are certain this is the document they mean (name, acronym, partial title, or pronoun resolvable
+            from prior conversation all count as high). If they asked about this doc in a previous turn, it's high.
+   medium = probable match, genuinely ambiguous (two docs share a similar name with no distinguishing context).
+   low    = guessing with no real evidence, or registry is empty.
+   CRITICAL: A name match (even partial), a prior explicit @mention, or a pronoun pointing to a doc seen
+   in this conversation is ALWAYS high. Never downgrade to medium because the question itself is hard.
 6. NEVER invent UUIDs. Only use UUIDs from the registry above."""
 
 

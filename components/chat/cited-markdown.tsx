@@ -222,12 +222,12 @@ export function CitedMarkdown({ content, citations, messageId }: Props) {
               className="border border-white/20 bg-primary/5 px-2.5 py-1.5 text-left font-semibold text-xs"
               {...props}
             >
-              {children}
+              {processReactChildren(children)}
             </th>
           ),
           td: ({ node: _node, children, ...props }) => (
             <td className="border border-white/20 px-2.5 py-1.5 text-xs" {...props}>
-              {children}
+              {processReactChildren(children)}
             </td>
           ),
 

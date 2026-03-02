@@ -6,11 +6,17 @@
 #   3. Adaptive-k semantic retrieval (k=15, threshold=0.5, max 5 chunks/doc)
 #   4. Optional Tavily web search (if enable_web_search=True)
 #   5. Mode selection:
-#        Mode A — RAG       : chunks or web results found → strict context answer
-#        Mode B — General   : no docs resolved + no chunks → general knowledge answer
-#        Mode C — Not Found : docs resolved but no matching chunks → inform user
+#        Mode A     — doc chunks only          → strict context answer
+#        Mode A+Web — doc chunks + web results → strict docs + web synthesis
+#        Mode B     — no docs resolved         → general knowledge answer
+#        Mode C     — docs resolved, no chunks → inform user (no hallucination)
 #   6. GPT-4o-mini structured generation → InquireResponse (response + citations)
 #   7. Return state update with all retrieval + cost metadata
+#
+# Conversation history: last 6 messages injected into the LLM call so the model
+# understands follow-up pronouns ("these regulations", "that policy", "it").
+# The system prompt explicitly instructs the LLM that history is context only —
+# the CURRENT user question is the primary task.
 #
 # The LLM receives the exact same [N] numbers used in context so citations
 # can be mapped back to source chunks/URLs by the frontend.
@@ -35,26 +41,59 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Structure: ROLE → CONTEXT (injected) → TASK → RULES → FORMAT  (§9 prompt rules)
 # Critical rules placed first and last — attention degrades in the middle.
+#
+# {history_note} — injected when conversation history is sent alongside the prompt.
+# Tells the LLM that history is context only; primary focus is the current question.
+# Empty string when no history is present.
 
-# Mode A — strict RAG (chunks or web results available)
+# Mode A — strict RAG (doc chunks only, no web results)
 _SYSTEM_PROMPT_RAG = """\
 You are a compliance document analyst for PolicyPal. Answer questions using ONLY the provided context.
 
 CONTEXT:
 {context_block}
 
-TASK: Answer the user's specific compliance question concisely and accurately.
+TASK: Answer the user's specific compliance question concisely and accurately.{history_note}
 
 RULES:
+- CITATION IDs: Each citation's `id` MUST equal the exact [N] number you wrote in the response. Never renumber 1, 2, 3... — if you cited [5], the citation object must have id=5.
 - Use ONLY the context above. Do not use prior knowledge or assumptions.
-- Place [N] citation markers immediately after every factual claim (e.g. "The minimum ratio is 8% [1].").
+- Place [N] markers immediately after every factual claim.
 - For claims supported by multiple sources, write markers together with no space: [1][2].
 - If the context does not contain the answer, state that explicitly — do not guess.
 - In each citation, copy the exact verbatim text from the source into the quote field.
-- Set doc_id to the DocID value shown in the context header. Set doc_id to null for web sources.
-- Set source_type to "document" for uploaded docs, "web" for web results.{user_context}
+- Set doc_id to the DocID value shown in the context header.
+- Set source_type to "document" for all sources.{user_context}
 
-FORMAT: Return a response string with inline [N] markers and a citations list where each entry id matches its [N] number.\
+FORMAT: Return a response string with inline [N] markers and a citations list. Each citation id must match its [N] marker exactly.\
+"""
+
+# Mode A+Web — mixed RAG (doc chunks + web results, or web results only)
+# Docs remain strictly cited; web results allow synthesis with caveats.
+_SYSTEM_PROMPT_RAG_WEB = """\
+You are a compliance document analyst for PolicyPal.
+
+CONTEXT (document and web sources):
+{context_block}
+
+TASK: Answer the user's specific compliance question using the provided context.{history_note}
+
+RULES — DOCUMENT SOURCES (entries with DocID):
+- Cite with [N] markers immediately after every factual claim.
+- Use ONLY what is explicitly stated — do not infer beyond the text.
+- Copy exact verbatim text from the passage into the quote field.
+- Set source_type to "document" and doc_id to the DocID value shown.
+
+RULES — WEB SOURCES (entries marked "(web)"):
+- You MAY synthesise across web results to answer time-sensitive questions (e.g. whether a regulation is still active, recent amendments).
+- Present web-sourced findings with an appropriate caveat, e.g. "Based on recent sources, ... however, confirm directly with the regulator for authoritative confirmation."
+- Set source_type to "web" and doc_id to null.
+- Do not fabricate specific regulatory text, clause numbers, or dates not present in the web content.
+
+CITATION IDs: Each citation id MUST equal the exact [N] number written in the response. Never renumber.
+If no context is relevant to the question, state that clearly — do not guess.{user_context}
+
+FORMAT: Return a response string with inline [N] markers and a citations list. Each citation id must match its [N] marker exactly.\
 """
 
 # Mode B — general knowledge (no documents resolved, no retrieval context)
@@ -63,7 +102,7 @@ You are a compliance document analyst for PolicyPal.
 
 No documents are attached to this conversation.
 
-TASK: Answer the user's compliance question from your general knowledge.
+TASK: Answer the user's compliance question from your general knowledge.{history_note}
 
 RULES:
 - Clearly state that this answer is based on general knowledge, not from uploaded documents.
@@ -79,7 +118,7 @@ You are a compliance document analyst for PolicyPal.
 
 DOCUMENTS SEARCHED: {doc_titles}
 
-TASK: Inform the user that no relevant passages were found in their document(s) for this question.
+TASK: Inform the user that no relevant passages were found in their document(s) for this question.{history_note}
 
 RULES:
 - Do NOT answer from general knowledge.
@@ -89,6 +128,13 @@ RULES:
 
 FORMAT: Return a helpful response string with an empty citations list.\
 """
+
+# Injected into system prompts when conversation history is included in the LLM call.
+# Explicitly tells the model that history is context only — current question is the focus.
+_HISTORY_NOTE = (
+    "\n\nThe conversation history that follows provides context for follow-up questions. "
+    "Your PRIMARY task is answering the CURRENT user question — history is context only."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +155,40 @@ def _extract_query(messages: list) -> str:
     return ""
 
 
+def _get_history_window(messages: list, n: int = 6) -> list:
+    """
+    Return the last N messages BEFORE the current HumanMessage turn.
+
+    Skips the last HumanMessage (the current query — sent separately as the user turn).
+    Only includes HumanMessage and AIMessage; no SystemMessages exist in state.
+    Capped at N=6 (3 turns) to prevent token bloat on long conversations.
+
+    Returns an empty list for the first message or when no prior history exists.
+    """
+    # Find the index of the last HumanMessage (current turn)
+    last_human_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx is None or last_human_idx == 0:
+        return []  # No prior history
+
+    # Collect up to N messages before the current turn (walk backwards, then reverse)
+    history: list = []
+    for msg in reversed(messages[:last_human_idx]):
+        if isinstance(msg, (HumanMessage, AIMessage)):
+            history.append(msg)
+        if len(history) >= n:
+            break
+
+    return list(reversed(history))
+
+
 def _build_context_block(chunks: list[dict], web_results: list[dict]) -> str:
     """
-    Build the numbered [N] context block injected into the Mode A system prompt.
+    Build the numbered [N] context block injected into system prompts.
 
     Document chunks:  [N] Source: {title} | Page: {page} | DocID: {uuid}
     Web results:      [N] Source: {title} (web) | URL: {url}
@@ -168,9 +245,19 @@ def inquire_action(state: AgentState) -> dict:
         query[:80], len(resolved_doc_ids), enable_web_search,
     )
 
-    # ── Step 2: Optimise query for retrieval ───────────────────────────────────
-    # rewrite_query() is a no-op when resolved_doc_titles is empty (general question).
-    retrieval_query = rewrite_query(query, resolved_doc_titles, "inquire")
+    # ── Step 2: Optimise query for retrieval (+ web query when enabled) ───────
+    # Passes conversation history so the rewriter resolves follow-up pronouns
+    # ("these regulations", "that policy") into explicit terminology.
+    # When web_search=True, a single LLM call also produces a Tavily-optimised
+    # web query using real-world regulatory names and temporal context.
+    rewrite_result = rewrite_query(
+        query,
+        resolved_doc_titles,
+        "inquire",
+        messages=messages,
+        web_search=enable_web_search,
+    )
+    retrieval_query = rewrite_result.retrieval
     logger.info("inquire | retrieval_query=%r", retrieval_query[:80])
 
     # ── Step 3: Semantic retrieval ─────────────────────────────────────────────
@@ -196,18 +283,28 @@ def inquire_action(state: AgentState) -> dict:
     web_search_query: str | None = None
 
     if enable_web_search:
-        web_search_query = retrieval_query[:200] if retrieval_query else "compliance regulatory requirements"
+        # Use the Tavily-optimised query from the rewriter (real-world names,
+        # temporal context). Fall back to truncated retrieval query if absent.
+        web_search_query = rewrite_result.web or retrieval_query[:150]
         web_results = tavily_search(web_search_query)
         logger.info(
             "inquire | web search: query=%r → %d results",
             web_search_query[:60], len(web_results),
         )
 
-    # ── Step 5: Select mode + build system prompt ──────────────────────────────
+    # ── Step 5: Build conversation history window ─────────────────────────────
+    # Last 6 messages (3 turns) before the current query — gives the LLM context
+    # to resolve follow-up pronouns ("these regulations", "that policy", "it").
+    history_window = _get_history_window(messages, n=6)
+    history_note = _HISTORY_NOTE if history_window else ""
+    logger.info("inquire | history_window=%d messages", len(history_window))
+
+    # ── Step 6: Select mode + build system prompt ──────────────────────────────
     # Mode selection must run AFTER web search so web_results is populated.
-    #   Mode A — chunks or web results found → strict RAG
-    #   Mode C — docs resolved but nothing retrieved → content not found
-    #   Mode B — no docs at all → general knowledge answer
+    #   Mode A     — doc chunks only               → strict RAG
+    #   Mode A+Web — web results present           → strict docs + web synthesis
+    #   Mode C     — docs resolved, no content     → content not found
+    #   Mode B     — no docs + no content          → general knowledge answer
 
     user_context_line = ""
     if user_industry or user_location:
@@ -218,34 +315,62 @@ def inquire_action(state: AgentState) -> dict:
         )
 
     has_content = len(chunks) > 0 or len(web_results) > 0
+    has_web = len(web_results) > 0
 
     if has_content:
-        # Mode A — build numbered context block and instruct strict RAG answer
         context_block = _build_context_block(chunks, web_results)
-        system_content = _SYSTEM_PROMPT_RAG.format(
-            context_block=context_block,
-            user_context=user_context_line,
-        )
-        logger.info("inquire | mode=RAG chunks=%d web=%d", len(chunks), len(web_results))
+        if has_web:
+            # Mode A+Web: web results present → allow synthesis from web sources
+            system_content = _SYSTEM_PROMPT_RAG_WEB.format(
+                context_block=context_block,
+                history_note=history_note,
+                user_context=user_context_line,
+            )
+            logger.info(
+                "inquire | mode=RAG+WEB chunks=%d web=%d history=%d",
+                len(chunks), len(web_results), len(history_window),
+            )
+        else:
+            # Mode A: doc chunks only → strict citation rules
+            system_content = _SYSTEM_PROMPT_RAG.format(
+                context_block=context_block,
+                history_note=history_note,
+                user_context=user_context_line,
+            )
+            logger.info(
+                "inquire | mode=RAG chunks=%d history=%d",
+                len(chunks), len(history_window),
+            )
 
     elif resolved_doc_ids:
         # Mode C — doc(s) were resolved but semantic search found nothing relevant.
         # Do NOT fall back to general knowledge — that would be misleading for compliance.
         doc_titles_str = ", ".join(resolved_doc_titles.values()) if resolved_doc_titles else "the selected document(s)"
-        system_content = _SYSTEM_PROMPT_NO_CHUNKS.format(doc_titles=doc_titles_str)
+        system_content = _SYSTEM_PROMPT_NO_CHUNKS.format(
+            doc_titles=doc_titles_str,
+            history_note=history_note,
+        )
         confidence_tier = "low"
         avg_similarity = 0.0
-        logger.info("inquire | mode=NOT_FOUND docs=%s", list(resolved_doc_titles.values()))
+        logger.info(
+            "inquire | mode=NOT_FOUND docs=%s history=%d",
+            list(resolved_doc_titles.values()), len(history_window),
+        )
 
     else:
         # Mode B — no documents in this conversation; answer from general knowledge.
-        system_content = _SYSTEM_PROMPT_GENERAL.format(user_context=user_context_line)
+        system_content = _SYSTEM_PROMPT_GENERAL.format(
+            history_note=history_note,
+            user_context=user_context_line,
+        )
         confidence_tier = "low"
         avg_similarity = 0.0
-        logger.info("inquire | mode=GENERAL (no resolved docs)")
+        logger.info("inquire | mode=GENERAL history=%d", len(history_window))
 
-    # Use the raw last HumanMessage as the user turn — includes @mention labels
-    # as natural language context for the LLM (not the engineered retrieval_query).
+    # ── Step 7: Build LLM message list ───────────────────────────────────────
+    # Structure: [SystemMessage] → [...history (context only)] → [HumanMessage (current query)]
+    # History helps the LLM resolve follow-up pronouns and conversation context.
+    # The system prompt explicitly instructs the LLM that history is context, not the task.
     last_human_content = ""
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
@@ -254,10 +379,11 @@ def inquire_action(state: AgentState) -> dict:
 
     llm_messages = [
         SystemMessage(content=system_content),
+        *history_window,
         HumanMessage(content=last_human_content),
     ]
 
-    # ── Step 6: LLM generation ────────────────────────────────────────────────
+    # ── Step 8: LLM generation ────────────────────────────────────────────────
     llm = get_llm_service()
     llm_result = llm.invoke_structured("inquire", InquireResponse, llm_messages)
     parsed: InquireResponse = llm_result.parsed

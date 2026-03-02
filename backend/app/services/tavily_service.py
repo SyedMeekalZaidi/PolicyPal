@@ -41,7 +41,7 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
         client = TavilyClient(api_key=api_key)
         response = client.search(
             query=query,
-            search_depth="basic",       # 1 credit per search
+            search_depth="advanced",     # richer content snippets (2 credits/search)
             max_results=max_results,
             topic="general",
             include_answer=False,       # skip LLM-generated summary (we generate our own)

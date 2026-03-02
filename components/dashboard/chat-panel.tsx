@@ -26,7 +26,7 @@ import { useRenameConversation } from "@/hooks/mutations/use-rename-conversation
 import { chatHistoryQueryKey, useChatHistory } from "@/hooks/queries/use-chat-history";
 import { useChatStream } from "@/hooks/use-chat-stream";
 import type { ChatSubmitPayload } from "@/lib/chat/extract-mentions";
-import type { ChatResponse, InterruptResponse, ResumeValue } from "@/lib/types/chat";
+import type { ChatResponse, Citation, InterruptResponse, ResumeValue } from "@/lib/types/chat";
 import type { ConversationRow } from "@/lib/types/conversations";
 
 type Props = {
@@ -190,12 +190,39 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
   useEffect(() => {
     if (!history.data) return;
 
-    const historyMessages = history.data.messages.map((m) => ({
-      id: m.id,
-      role: m.role as ChatMessage["role"],
-      text: m.content,
-      // doc and response are not stored in checkpoints — shown as plain text for history
-    }));
+    const historyMessages = history.data.messages.map((m) => {
+      const base = { id: m.id, role: m.role as ChatMessage["role"], text: m.content };
+
+      // Reconstruct response payload from persisted metadata in AIMessage.additional_kwargs.
+      // format_response writes citations, confidence, cost there so they survive refresh.
+      if (m.role === "assistant" && m.metadata && Object.keys(m.metadata).length > 0) {
+        const meta = m.metadata;
+        return {
+          ...base,
+          response: {
+            type: "response" as const,
+            response: m.content,
+            citations: (meta.citations as Citation[]) ?? [],
+            action: (meta.action as string) ?? "",
+            inference_confidence: (meta.inference_confidence as string) ?? "",
+            retrieval_confidence: (meta.retrieval_confidence as string) ?? "low",
+            tokens_used: (meta.tokens_used as number) ?? 0,
+            cost_usd: (meta.cost_usd as number) ?? 0.0,
+          } satisfies ChatResponse,
+        };
+      }
+      return base;
+    });
+
+    // Restore Sources Panel — populate with the last assistant message's citations.
+    // Mirrors the onResponse handler that sets activeCitations for live messages.
+    const lastWithCitations = [...historyMessages]
+      .reverse()
+      .find((m) => m.role === "assistant" && (m as ChatMessage).response?.citations?.length);
+    if (lastWithCitations) {
+      setActiveCitations(((lastWithCitations as ChatMessage).response?.citations) ?? []);
+    }
+    setHighlightedGroup(null);
 
     if (history.data.pending_interrupt) {
       setInterruptPayload(history.data.pending_interrupt);
@@ -211,7 +238,7 @@ export function ChatPanel({ conversationId, initialTitle }: Props) {
     } else if (historyMessages.length > 0) {
       setMessages(historyMessages);
     }
-  }, [history.data]);
+  }, [history.data, setActiveCitations, setHighlightedGroup]);
 
   // Auto-scroll when new messages arrive (NOT on status updates — avoids jitter)
   useEffect(() => {

@@ -22,7 +22,9 @@ import type {
   StatusEvent,
 } from "@/lib/types/chat";
 
-const STREAM_TIMEOUT_MS = 30_000;
+// 120s — LLM generation over large docs (stratified sampling + OpenAI retries) can take 60-90s.
+// Timeout resets on every received SSE event, so it only fires on truly dead connections.
+const STREAM_TIMEOUT_MS = 120_000;
 
 type ChatStreamCallbacks = {
   onStatus?: (event: StatusEvent) => void;
@@ -64,10 +66,11 @@ export function useChatStream(callbacks: ChatStreamCallbacks) {
     _clearTimeout();
     timeoutRef.current = setTimeout(() => {
       abortControllerRef.current?.abort();
-      setError("Connection timed out");
+      const timeoutMsg = "The request took too long to complete. This can happen with large documents — please try again.";
+      setError(timeoutMsg);
       setReasoningStatus(null);
       setIsStreaming(false);
-      callbacksRef.current.onError?.("Connection timed out");
+      callbacksRef.current.onError?.(timeoutMsg);
     }, STREAM_TIMEOUT_MS);
   }, [_clearTimeout]);
 

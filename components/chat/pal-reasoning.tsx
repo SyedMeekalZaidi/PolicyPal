@@ -6,12 +6,18 @@
 // Each node completion emits a StatusEvent. This component renders the latest
 // one with a 300ms minimum display time so rapid node completions are readable.
 // Null clears immediately (the AI response is ready — don't delay showing it).
+//
+// Sticky docs: once doc pills appear (from doc_resolver), they stay visible
+// through all subsequent node statuses until the response arrives. This prevents
+// pills from vanishing after ~1 frame when validate_inputs immediately follows.
 
 import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 import type { StatusEvent } from "@/lib/types/chat";
 
 const MIN_DISPLAY_MS = 300;
+
+type DocEntry = { id: string; title: string };
 
 type Props = {
   status: StatusEvent | null;
@@ -20,6 +26,9 @@ type Props = {
 export function PalReasoning({ status }: Props) {
   // displayedStatus is what actually renders — may lag status by up to 300ms
   const [displayedStatus, setDisplayedStatus] = useState<StatusEvent | null>(null);
+  // Latched docs: set when first received, cleared only when status goes null
+  const [stickyDocs, setStickyDocs] = useState<DocEntry[]>([]);
+
   const lastRenderTimeRef = useRef(0);
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Always keep the latest status accessible inside timer callbacks
@@ -27,7 +36,6 @@ export function PalReasoning({ status }: Props) {
   latestStatusRef.current = status;
 
   useEffect(() => {
-    // Cancel any queued update — we'll re-schedule if needed
     if (pendingTimerRef.current) {
       clearTimeout(pendingTimerRef.current);
       pendingTimerRef.current = null;
@@ -36,6 +44,7 @@ export function PalReasoning({ status }: Props) {
     if (status === null) {
       // Terminal: clear immediately — the AI message is ready to display
       setDisplayedStatus(null);
+      setStickyDocs([]);
       lastRenderTimeRef.current = 0;
       return;
     }
@@ -64,6 +73,14 @@ export function PalReasoning({ status }: Props) {
     };
   }, [status]);
 
+  // Latch docs_found — populate on first arrival, never clear mid-run
+  useEffect(() => {
+    if (!displayedStatus) return;
+    if (displayedStatus.docs_found && displayedStatus.docs_found.length > 0) {
+      setStickyDocs(displayedStatus.docs_found);
+    }
+  }, [displayedStatus]);
+
   if (!displayedStatus) return null;
 
   return (
@@ -77,10 +94,10 @@ export function PalReasoning({ status }: Props) {
         <span className="font-medium">{displayedStatus.message}</span>
       </div>
 
-      {/* Doc pills — shown when doc_resolver resolves documents */}
-      {displayedStatus.docs_found && displayedStatus.docs_found.length > 0 && (
+      {/* Doc pills — rendered from stickyDocs so they persist across all subsequent nodes */}
+      {stickyDocs.length > 0 && (
         <div className="flex flex-wrap gap-1.5 pl-5">
-          {displayedStatus.docs_found.map((doc) => (
+          {stickyDocs.map((doc) => (
             <span
               key={doc.id}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"

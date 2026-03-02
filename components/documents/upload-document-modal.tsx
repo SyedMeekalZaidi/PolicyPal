@@ -245,7 +245,7 @@ export function UploadDocumentModal({ open, onOpenChange }: Props) {
             <Label htmlFor="file">PDF File *</Label>
             <div
               className={cn(
-                "flex items-center gap-3 rounded-xl border border-dashed p-4 cursor-pointer hover:bg-muted/50 transition-colors",
+                "flex items-center gap-3 rounded-xl border border-dashed p-4 cursor-pointer hover:bg-muted/50 transition-colors overflow-hidden",
                 fileError && "border-destructive",
                 file && !fileError && "border-primary/40 bg-primary/5"
               )}
@@ -257,7 +257,7 @@ export function UploadDocumentModal({ open, onOpenChange }: Props) {
                   file && !fileError ? "text-primary" : "text-muted-foreground"
                 )}
               />
-              <div className="flex-1 min-w-0">
+              <div className="flex-1 min-w-0 w-0">
                 {file ? (
                   <>
                     <p className="text-sm font-medium text-foreground truncate">

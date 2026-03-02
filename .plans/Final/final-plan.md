@@ -437,80 +437,813 @@ Six sub-phases, each independently testable. Must complete in order (each depend
 
 ---
 
-### Phase 2: Summarize (~45 min)
-**Reuses retrieval service + citation pattern from Phase 1.**
+## Phase 2: Summarize (~45 min)
 
-- Replace `summarize` stub: stratified sampling (see Research §1c) — positional spread across document → GPT-4o-mini structured summary → citations
-- Multi-doc: per-doc section headings in response
-- Same citation/confidence/cost pattern
+**Overview:** Replace the summarize stub with a real action node. Uses `stratified_sample()` (positional spread, NOT semantic search) to get representative chunks across the full document, then GPT-4o-mini produces a structured summary with key points and citations. Multi-doc messages get per-doc section headings. No web search — summarization is inherently about the user's uploaded documents.
 
-**Test:** "@Summarize @BankNegara2024" → structured summary with key points + citations
+**Key architectural differences from Inquire:**
+- **No `rewrite_query()`** — stratified sampling is position-based, query doesn't affect which chunks are returned
+- **No web search** — `enable_web_search` is ignored; summarization is about the user's docs only
+- **No mode selection (A/B/C)** — `validate_inputs` already enforces that Summarize requires 1+ docs. Only one prompt mode needed.
+- **Per-doc grouping** — context block groups chunks by document (not interleaved by relevance) so the LLM produces coherent per-doc summaries
+- **Confidence always "high"** — stratified sampling covers the full document by design
+
+**Reuses from Phase 1:**
+- `retrieval_service.stratified_sample()` — already built and tested
+- `Citation` Pydantic model from `action_schemas.py`
+- `LLMService.invoke_structured()` → `LLMResult`
+- `format_response` metadata injection (no changes needed)
+- `@traceable` decorator for LangSmith observability
+- `_enrich_with_titles()` — already called inside `stratified_sample()`
+
+**Files changed:**
+
+| File | Change Type |
+|------|-------------|
+| `backend/app/models/action_schemas.py` | Add `SummarizeResponse` schema |
+| `backend/app/graph/nodes/summarize.py` | **New file** — real summarize action node |
+| `backend/app/graph/builder.py` | Swap import from `stub_actions.summarize_action` → `summarize.summarize_action` |
+| `backend/app/graph/nodes/validate_inputs.py` | Extend web search cleanup to also drop flag for `summarize` |
+
+**Files NOT changed:** `state.py`, `chat.py`, `format_response.py`, `retrieval_service.py`, `llm_service.py`, all frontend files.
 
 ---
 
-### Phase 3: Compare (~1.5 hrs)
+### Sub-phase 2.1: SummarizeResponse Schema
+**Goal:** Add the Pydantic structured output schema for the Summarize LLM call.
+
+**File:** `backend/app/models/action_schemas.py`
+
+**Tasks:**
+1. Add `SummarizeResponse(BaseModel)` with 3 fields:
+   - `summary: str` — Full structured summary with inline `[N]` citation markers. For multi-doc, includes markdown `### DocTitle` section headings.
+   - `key_points: list[str]` — 3-7 bullet-point key takeaways extracted from the document(s). Each point should be 1-2 sentences. No citation markers needed here (they're in the summary).
+   - `citations: list[Citation]` — Same `Citation` model as Inquire. id matches `[N]` markers in the summary text.
+
+**Why `key_points` as a separate field?** Gives the frontend a clean structured list for display without parsing markdown bullets. Also forces the LLM to distill takeaways rather than just dumping text — better output quality.
+
+**Edge case:** LLM might return 0 key points for a very short document. This is fine — the summary field is the primary output.
+
+---
+
+### Sub-phase 2.2: validate_inputs — Drop Web Search for Summarize
+**Goal:** Explicitly drop `enable_web_search` for summarize in `validate_inputs`, matching the existing compare pattern. Log a message so LangSmith traces show it was intentionally dropped.
+
+**File:** `backend/app/graph/nodes/validate_inputs.py`
+
+**Tasks:**
+1. Change the web search cleanup condition from:
+   `if action == "compare" and enable_web_search:`
+   to:
+   `if action in ("compare", "summarize") and enable_web_search:`
+2. Update the log message to include the action name:
+   `"validate_inputs | %s + web_search=True -> dropping web search flag (not applicable)", action`
+
+**Why here instead of in the summarize node?**
+`validate_inputs` is the single place where action-specific flag cleanup lives. Doing it there keeps the summarize node clean (it never even sees `enable_web_search`) and prevents stale `True` values from polluting traces or future cost tracking logic. Consistent with how compare already works.
+
+**Edge case:** User sends `@Summarize @Web Search @Doc` — frontend sets `enable_web_search=True`. After this fix, `validate_inputs` drops it to `False` and logs the reason. The summarize node never knows web search was requested — clean separation.
+
+---
+
+### Sub-phase 2.3: Summarize Action Node
+**Goal:** Create the real `summarize_action` that replaces the stub.
+
+**File:** `backend/app/graph/nodes/summarize.py` (new file)
+
+**Pipeline (7 steps):**
+
+```
+Step 1: Read state
+  → resolved_doc_ids, resolved_doc_titles, clean_query, user_id, user_industry, user_location
+
+Step 2: stratified_sample(user_id, resolved_doc_ids)
+  → ~16 chunks per doc, evenly spread across intro/body/conclusion
+  → confidence_tier always "high"
+
+Step 3: Build per-doc context block
+  → Group chunks by document_id
+  → For each doc group: "### {doc_title}" header, then numbered [N] entries
+  → Global numbering across all docs: [1]...[N]
+
+Step 4: Build system prompt
+  → Role: compliance document summarizer
+  → Context: per-doc grouped context block
+  → Task: structured summary with per-doc sections (if multi-doc)
+  → Rules: cite with [N], produce key_points, don't merge unrelated sections
+  → User context: industry/location if available
+
+Step 5: Build human message
+  → If clean_query is non-empty: use it (e.g. "Focus on governance requirements")
+  → If clean_query is empty (pure mention): use "Summarize these documents comprehensively."
+
+Step 6: LLM call
+  → invoke_structured("summarize", SummarizeResponse, messages) → LLMResult
+
+Step 7: Return state update
+  → Same shape as Inquire: response, citations, retrieved_chunks, confidence, cost, AIMessage
+  → response = f"{parsed.summary}\n\n**Key Points:**\n{bullet_list}"
+    (combine summary + key_points into one response string for the frontend renderer)
+  → confidence_score = 1.0 (fixed — stratified sampling has no similarity scores to average;
+    Inquire uses avg cosine similarity here, but positional sampling always covers the full doc)
+  → retrieval_confidence = "high" (from stratified_sample — always "high" by design)
+```
+
+**System prompt design (following §9 prompt engineering rules):**
+
+Single mode — strict document context (no general knowledge fallback):
+```
+Role:   You are a compliance document summarizer for PolicyPal.
+Context: [per-doc grouped chunks with [N] numbering]
+Task:   Produce a structured summary of the document(s).
+        For multi-doc: use ### headings for each document section.
+        Extract 3-7 key takeaways as bullet points.
+Rules:  - Cite specific claims with [N] markers
+        - Cover all major topics found in the context
+        - Do not merge content from different documents into one section
+        - If user provided a focus instruction, emphasize that area
+        - Copy verbatim quotes into citation quote fields
+User context: {industry/location if available}
+Format: Return summary (markdown with [N] markers), key_points (list of strings), citations (list)
+```
+
+**Context block helper — `_build_summarize_context()`:**
+
+Unlike Inquire's `_build_context_block()` which interleaves all chunks by relevance, Summarize needs **per-doc grouping** so the LLM can write coherent per-doc sections:
+
+```
+### Muscle Building Guide
+[1] Source: Muscle Building Guide | Page: 2 | DocID: 80b7...
+"Training hard with weights gives your body that reason..."
+
+[2] Source: Muscle Building Guide | Page: 4 | DocID: 80b7...
+"Good lifting technique allows you to stimulate..."
+
+### BankNegara 2024
+[3] Source: BankNegara 2024 | Page: 1 | DocID: a3f2...
+"This policy document sets out the minimum..."
+```
+
+Global `[N]` numbering across all docs — critical for citation mapping.
+
+**Why a separate helper instead of reusing `_build_context_block()` from Inquire?**
+Different structure requirement: Inquire interleaves chunks by relevance (no doc grouping), Summarize groups by document. The numbering logic and metadata format are the same, but the grouping is fundamentally different. Keeping them separate avoids a tangled `if action == "summarize"` branch in a shared function.
+
+**Edge cases handled:**
+- `resolved_doc_ids = []` → `stratified_sample` returns 0 chunks → short "no documents to summarize" response. (Shouldn't happen — `validate_inputs` catches this, but defensive.)
+- Single doc with 3 chunks → `stratified_sample` gets all 3 → LLM works fine with less context, summary is just shorter.
+- `clean_query` has focus instruction → passes through as the HumanMessage → LLM naturally focuses the summary.
+- 5 docs (max allowed) → ~80 chunks → ~16,000 tokens of context → within GPT-4o-mini's 128k window, no issue.
+
+---
+
+### Sub-phase 2.4: Builder Wiring
+**Goal:** Replace the stub import with the real summarize node.
+
+**File:** `backend/app/graph/builder.py`
+
+**Tasks:**
+1. Change import: `from app.graph.nodes.stub_actions import summarize_action` → `from app.graph.nodes.summarize import summarize_action`
+2. Keep `audit_action` and `compare_action` still imported from `stub_actions` (they stay as stubs until Phase 3 and 4).
+3. No edge changes — `"summarize"` node name already exists in the graph.
+
+**After this change, `stub_actions.py` still provides:**
+- `compare_action` (stub until Phase 3)
+- `audit_action` (stub until Phase 4)
+- `_build_stub_response` helper (shared by remaining stubs)
+
+The `summarize_action` and `inquire_action` functions in `stub_actions.py` are now dead code. Do NOT delete `stub_actions.py` — the other two stubs still depend on it.
+
+---
+
+### Sub-phase 2.5: Final Integration Test
+
+**Test scenarios — all 5 must pass:**
+
+| # | Input | Expected |
+|---|-------|----------|
+| S1 | `@Summarize @MuscleBuilding` | Structured summary with ~5 citations, key points, confidence=high, confidence_score=1.0, cost > 0 |
+| S2 | `@Summarize @AtomicHabits @MuscleBuilding` | Per-doc sections with `###` headings, citations from both docs |
+| S3 | `@Summarize @AtomicHabits Focus on identity change` | Summary emphasizes identity-based habits, key points filtered to that focus |
+| S4 | Refresh page after S1 | Confidence badge, cost, citations all persist (format_response already handles this) |
+| S5 | `@Summarize @Web Search @AtomicHabits` | `validate_inputs` logs "dropping web search flag". Summary produced normally — no web results in citations. |
+
+**LangSmith trace should show:**
+```
+intent_resolver → doc_resolver → validate_inputs → summarize → format_response
+```
+- `summarize` span contains: `stratified_sample` as a child retriever span
+- No `rewrite_query` span (not used)
+- No `web_search` span (not used)
+
+**Regression — Inquire must still work:** Send `@Inquire @AtomicHabits What is this about?` after testing Summarize. Should return normal RAG answer. The builder change only swapped the summarize import — inquire is untouched.
+
+---
+
+## Phase 3: Compare (~1.5 hrs)
 **Both focused + holistic modes in MVP.**
 
-- Replace `compare` stub
-- **Mode detection — mini-LLM classification (NOT text-length heuristic):**
-  - First step in compare node: call GPT-4o-mini with a tiny structured output to classify intent
-  - Uses `llm_service.invoke_structured("intent", CompareIntent, msgs)` — routes to `gpt-4o-mini` via the `"intent"` action key (classification task, same routing as intent_resolver)
-  - Pydantic model: `CompareIntent(mode: Literal["focused", "holistic"], topic: Optional[str])`
-  - Prompt: "Given these documents and the user's request, determine: (a) is this a focused comparison about a specific topic, or a holistic general comparison? (b) if focused, what is the specific topic?"
-  - Cost: ~$0.001 per classification (negligible). Tokens/cost from this call are added to the action's total.
-  - **Why mini-LLM over heuristic:** A user might write "Do a holistic comparison of how @BankNegara and @FSA approach risk management, governance, and penalties — I want a thorough report" — long text but clearly holistic. Text-length heuristic would wrongly classify this as focused.
-  - **Bonus:** For focused mode, the extracted `topic` string becomes the retrieval query — more precise than using the raw user message
-- **Focused mode (GPT-4o-mini):**
-  - Per-doc targeted retrieval using the extracted `topic` as query (scoped per doc, k=7 each)
-  - LLM generates difference TABLE (markdown) for 2-3 docs
-  - Table format: `| Aspect | Doc1 | Doc2 | (Doc3) |` — clear per-doc breakdown
-  - **Table UX:** CSS `overflow-x: auto` wrapper on markdown tables so they scroll horizontally if needed. Max 3 doc columns to keep it readable.
-- **Holistic mode (GPT-4o):**
-  - Stratified sampling across all docs (reuse from Summarize)
-  - `extract_themes()` — shared helper (1 LLM call: GPT-4o-mini): input sampled chunks → output 3-5 theme strings
-  - GPT-4o 5-section report: Overview, Key Differences, Similarities, Unique Aspects, Implications
-  - Same citation pattern as other actions
-- `extract_themes()` helper lives in `backend/app/services/theme_service.py` — reused by Audit policy mode
+**Overview:** Replace the compare stub with a real action node that has two distinct pipelines selected at runtime by a mini-LLM classification step. Focused mode produces a markdown TABLE via per-doc semantic search; holistic mode produces a 5-section report via stratified sampling + theme extraction. Both use GPT-4o for the final generation (strongest reasoning for cross-document synthesis).
 
-**Test:** 
-- Focused: "@Compare @BankNegara2024 @FSA capital requirements" → markdown table (mini-LLM extracts topic: "capital requirements")
-- Holistic: "@Compare @BankNegara2024 @FSA" (no topic) → 5-section report
-- Edge: "@Compare @BankNegara2024 @FSA give me a thorough analysis of everything" → holistic (mini-LLM recognizes "everything" = holistic despite long text)
+**Key architectural differences from Inquire/Summarize:**
+- **Two pipelines in one node** — mode classification first, then branch to focused or holistic
+- **Multiple LLM calls per run** — classification (mini) + optional themes (mini) + generation (4o). Costs must be summed.
+- **GPT-4o for generation** — `"compare"` action key routes to `gpt-4o` (not mini) for multi-doc reasoning quality
+- **Per-doc balanced retrieval** (focused) — individual `search_chunks()` per doc to guarantee balanced coverage
+- **No web search** — `validate_inputs` already drops the flag for compare
+
+**Reuses from Phase 1 & 2:**
+- `search_chunks()` — focused per-doc semantic retrieval
+- `stratified_sample()` — holistic full-doc positional sampling
+- `rewrite_query()` with `"compare"` template — query optimization for focused mode
+- `Citation` Pydantic model, `LLMService.invoke_structured()` → `LLMResult`
+- `_build_summarize_context()` pattern — per-doc grouped `[N]` context blocks
+- `format_response` metadata injection (no changes needed)
+- `@traceable` for LangSmith observability
+- `CitedMarkdown` table rendering with `overflow-x: auto` (already built in Phase 1)
+
+**Files changed:**
+
+| File | Change Type |
+|------|-------------|
+| `backend/app/models/action_schemas.py` | Add `CompareIntent` + `CompareResponse` schemas |
+| `backend/app/services/theme_service.py` | **New file** — `extract_themes()` shared helper (reused by Audit Phase 4) |
+| `backend/app/graph/nodes/compare.py` | **New file** — real compare action node |
+| `backend/app/graph/builder.py` | Swap import from `stub_actions.compare_action` → `compare.compare_action` |
+
+**Files NOT changed:** `state.py`, `validate_inputs.py`, `llm_service.py`, `retrieval_service.py`, `graph/utils.py`, `chat.py`, all frontend files.
 
 ---
 
-### Phase 4: Audit (~2 hrs)
+### Sub-phase 3.1: CompareIntent + CompareResponse Schemas
+**Goal:** Add Pydantic structured output schemas for mode classification and the compare LLM call.
+
+**File:** `backend/app/models/action_schemas.py`
+
+**Tasks:**
+1. Add `CompareIntent(BaseModel)` with 2 fields:
+   - `mode: Literal["focused", "holistic"]` — classification result
+   - `topic: Optional[str] = None` — extracted specific topic for focused mode (null for holistic)
+
+2. Add `CompareResponse(BaseModel)` with 2 fields:
+   - `response: str` — Markdown with inline `[N]` markers. For focused: comparison table + brief analysis. For holistic: 5-section report with `###` headings.
+   - `citations: list[Citation]` — Same Citation model as Inquire/Summarize.
+
+**Why one CompareResponse for both modes?** The mode-specific structure (table vs 5-section) is encoded in the markdown via prompt instructions. The frontend's `CitedMarkdown` already renders both tables and headings. Separate schemas would add complexity for no benefit.
+
+---
+
+### Sub-phase 3.2: Theme Service (Shared Helper)
+**Goal:** Create `extract_themes()` — a GPT-4o-mini call that distills document chunks into 3-5 comparison themes. Used by holistic compare now and by Audit policy mode in Phase 4.
+
+**File:** `backend/app/services/theme_service.py` (new file)
+
+**Design:**
+- Input: list of chunks (from `stratified_sample`), dict of `{doc_id: title}` (same shape as `resolved_doc_titles` in state)
+- Returns: `LLMResult` — caller accesses `.parsed.themes: list[str]` for the 3-5 theme strings, and `.tokens_used` / `.cost_usd` to sum into the node total
+- LLM call: `invoke_structured("intent", ThemeExtraction, messages)` — routes to GPT-4o-mini via `"intent"` action key (classification task, same routing as intent_resolver)
+- Private Pydantic schema: `ThemeExtraction(themes: list[str])`
+- `@traceable(run_type="tool", name="extract_themes")`
+
+**Caller usage pattern:**
+```python
+theme_result = extract_themes(chunks, resolved_doc_titles)
+themes: list[str] = theme_result.parsed.themes
+total_tokens += theme_result.tokens_used
+total_cost += theme_result.cost_usd
+```
+
+**System prompt:**
+```
+You are a document analysis assistant.
+
+DOCUMENTS: {comma-separated doc titles}
+
+CONTEXT (representative passages from the documents):
+[1] {chunk1 content, first 300 chars}
+[2] {chunk2 content, first 300 chars}
+...
+
+TASK: Identify 3-5 major themes or topics that appear across these documents — either as shared requirements or as key points of divergence. Each theme should be 2-5 words.
+
+RULES:
+- Focus on compliance/regulatory themes (requirements, frameworks, processes, penalties).
+- Return exactly 3-5 themes — no more, no fewer.
+- Each theme must be grounded in the context above, not invented from general knowledge.
+```
+
+**Why a separate service file?** Audit policy mode (Phase 4) needs the exact same function. Putting it in `compare.py` would require Audit to import from another action node (messy coupling). A service file keeps it clean — `theme_service.py` alongside `retrieval_service.py` and `llm_service.py`.
+
+**Edge case:** LLM returns < 3 themes OR fails → return a fallback `LLMResult` with `parsed.themes = ["Key Requirements", "Implementation Approach", "Compliance Standards"]` and zero cost. Wraps error in a try/except — never crashes the graph.
+
+---
+
+### Sub-phase 3.3: Compare Action Node
+**Goal:** Create the real `compare_action` that replaces the stub. Contains the mode classification, two retrieval branches, and two prompt modes.
+
+**File:** `backend/app/graph/nodes/compare.py` (new file)
+
+**Pipeline (9 steps):**
+
+```
+Step 1: Read state
+  → resolved_doc_ids, resolved_doc_titles, clean_query, user_id, user_industry, user_location
+
+Step 2: Mode classification
+  → If clean_query is empty → shortcut to "holistic" (no LLM, $0)
+  → Else → invoke_structured("intent", CompareIntent, classification_prompt) → mode + topic
+  → Track classification tokens/cost
+
+Step 3: Branch on mode
+  ├── FOCUSED (Steps 4a–5a)
+  └── HOLISTIC (Steps 4b–5b)
+
+Step 4a (Focused): Per-doc semantic retrieval
+  → rewrite_query(topic or clean_query, doc_titles, "compare") → optimized_query
+  → For each doc_id: search_chunks(optimized_query, user_id, [doc_id], k=7, threshold=0.5)
+  → Merge all per-doc chunks into one list
+  → Confidence: average similarity across all chunks (or "low" if 0 chunks)
+
+Step 4b (Holistic): Stratified sampling + theme extraction
+  → stratified_sample(user_id, resolved_doc_ids) → ~16 chunks per doc
+  → extract_themes(chunks, resolved_doc_titles) → LLMResult; access .parsed.themes for 3-5 strings
+  → Track theme_result.tokens_used / theme_result.cost_usd
+  → Confidence: fixed 1.0 / "high"
+
+Step 5: Build per-doc grouped context block
+  → _build_compare_context(chunks, resolved_doc_ids, resolved_doc_titles, sort_by)
+  → Group by doc_id → "### DocTitle (DocID: {id})" heading per doc (ALWAYS, even if 0 chunks)
+  → Docs with 0 chunks → placeholder: "(No relevant passages found for this topic.)"
+  → Docs with chunks → [N] numbered content, global numbering across all docs
+  → sort_by="similarity" for focused, "chunk_index" for holistic
+
+Step 6: Build mode-specific system prompt
+
+Step 7: Build human message
+  → Focused: use clean_query (the user's full question/topic)
+  → Holistic: "Compare these documents comprehensively across the identified themes."
+
+Step 8: LLM call → GPT-4o
+  → invoke_structured("compare", CompareResponse, messages) → LLMResult
+  → Track generation tokens/cost
+
+Step 9: Return state update
+  → Sum ALL LLM costs: classification + themes (if holistic) + generation
+  → Same return shape as Inquire/Summarize
+```
+
+**Classification prompt (Step 2):**
+```
+You are a comparison mode classifier.
+
+DOCUMENTS: {doc titles}
+
+TASK: Given the user's comparison request, determine:
+1. Mode: "focused" if the user asks about a SPECIFIC topic/aspect, "holistic" if they want a general/comprehensive comparison.
+2. Topic: if focused, extract the specific topic (2-10 words). If holistic, set to null.
+
+RULES:
+- "Compare everything" / "thorough analysis" / no specific topic → holistic
+- "Compare capital requirements" / "how do they differ on X?" → focused with topic=X
+- When in doubt, default to holistic (safer — shows everything)
+```
+
+**Focused system prompt (Step 6a):**
+```
+You are a compliance document comparison analyst for PolicyPal.
+
+CONTEXT:
+{per-doc grouped context block}
+
+COMPARISON TOPIC: {topic}
+
+TASK: Generate a focused comparison of the documents on the specified topic.
+1. Start with a markdown COMPARISON TABLE:
+   | Aspect | {Doc1Title} | {Doc2Title} | ({Doc3Title if present}) |
+   Fill each cell with the key finding for that aspect from that document.
+2. After the table, write a brief (2-3 paragraph) analysis highlighting the most important differences and their implications.
+
+RULES:
+- Place [N] citation markers after factual claims in both the table cells and the analysis.
+- Use ONLY the context above. Do not use prior knowledge.
+- If a document doesn't address a particular aspect, write "Not addressed" in that cell.
+- Include 4-8 meaningful comparison aspects (rows) in the table.
+- In each citation, copy the exact verbatim text from the source into the quote field.
+- Set doc_id to the DocID value shown in the context header.{user_context}
+
+FORMAT: Return a response string (markdown table + analysis with [N] markers) and a citations list.
+```
+
+**Holistic system prompt (Step 6b):**
+```
+You are a compliance document comparison analyst for PolicyPal.
+
+CONTEXT:
+{per-doc grouped context block}
+
+KEY THEMES IDENTIFIED: {theme1, theme2, theme3, ...}
+
+TASK: Generate a comprehensive comparison report with these 5 sections:
+### Overview
+What each document covers and its primary purpose.
+### Key Differences
+Where the documents diverge on the identified themes.
+### Similarities
+Common ground and shared requirements across the documents.
+### Unique Aspects
+What is exclusive to each document (not found in others).
+### Implications
+Practical takeaways — what do these differences and similarities mean for compliance?
+
+RULES:
+- Place [N] citation markers after factual claims throughout all sections.
+- Use ONLY the context above. Do not use prior knowledge.
+- Address each identified theme across the relevant sections.
+- Do not merge content from different documents without attribution.
+- In each citation, copy the exact verbatim text from the source into the quote field.
+- Set doc_id to the DocID value shown in the context header.{user_context}
+
+FORMAT: Return a response string (5-section markdown report with ### headings and [N] markers) and a citations list.
+```
+
+**Context block helper — `_build_compare_context()`:**
+Same structure as Summarize's `_build_summarize_context()` with one critical difference: **docs with 0 matching chunks are NOT skipped** — they still get a `### DocTitle` heading followed by a `(No relevant passages found for this topic.)` placeholder line. This is essential so the LLM knows all tagged documents exist and writes "Not addressed" in the table column rather than silently omitting a doc from the comparison.
+
+Sorting:
+- Focused mode: chunks sorted by similarity desc within each doc (most relevant first)
+- Holistic mode: chunks sorted by chunk_index asc within each doc (positional document flow)
+
+The `sort_by` parameter (default `"similarity"`) controls this — one helper handles both modes cleanly.
+
+**Why a separate helper instead of importing from Summarize?**
+- Summarize silently skips docs with 0 chunks (correct — nothing to summarize)
+- Compare must include all docs even with 0 chunks (critical for table columns and LLM awareness)
+- The empty-doc placeholder text differs by use-case
+
+These are fundamentally different behaviors. Merging them with a branch parameter would make both helpers harder to reason about.
+
+**Edge cases handled:**
+- `clean_query` empty → shortcut to holistic, skip classification LLM (saves $0.001 + latency)
+- Classification fails (LLM error) → fallback to holistic (safer default — shows everything)
+- Classification says focused but `topic` is null → use `clean_query` as topic. If clean_query is also empty, fall back to holistic.
+- Focused: 0 chunks from ALL docs → skip context block construction, return early with "I couldn't find relevant content about '{topic}' in the selected documents." message, confidence=low, confidence_score=0.0.
+- Focused: 0 chunks from SOME docs (partial miss) → placeholder `(No relevant passages found.)` per missing doc. LLM writes "Not addressed" in table cells for that doc. Other docs still contribute their columns.
+- Holistic: 0 chunks from stratified_sample (document has no stored chunks, i.e. still processing) → same placeholder. Extremely rare since `validate_inputs` only passes `ready` documents, but defensive.
+- 4-5 docs in focused table → wide table. `CitedMarkdown` has `overflow-x: auto` → horizontal scroll. No forced mode switch.
+- Cost tracking: `classify_cost` + `theme_cost` (holistic only) + `generate_cost` — all summed and returned in `cost_usd` and `tokens_used`.
+
+---
+
+### Sub-phase 3.4: Builder Wiring
+**Goal:** Replace the stub import with the real compare node.
+
+**File:** `backend/app/graph/builder.py`
+
+**Tasks:**
+1. Change import: `from app.graph.nodes.stub_actions import (audit_action, compare_action,)` → `from app.graph.nodes.stub_actions import audit_action` + `from app.graph.nodes.compare import compare_action`
+2. `audit_action` remains imported from `stub_actions` (stays as stub until Phase 4).
+3. No edge changes — `"compare"` node name already exists in the graph.
+
+**After this change, `stub_actions.py` still provides:**
+- `audit_action` (stub until Phase 4)
+- `_build_stub_response` helper (used only by audit stub)
+
+The `summarize_action`, `inquire_action`, and `compare_action` functions in `stub_actions.py` are now dead code. Do NOT delete `stub_actions.py` — the audit stub still depends on it.
+
+---
+
+### Sub-phase 3.5: Final Integration Test
+
+**Test scenarios — all 6 must pass:**
+
+| # | Input | Expected Mode | Expected Output |
+|---|-------|--------------|-----------------|
+| C1 | `@Compare @BankNegara @MuscleBuilding capital requirements` | Focused | Markdown table (Aspect / BankNegara / MuscleBuilding) + analysis, citations, confidence from avg similarity |
+| C2 | `@Compare @AtomicHabits @MuscleBuilding` (no text) | Holistic (shortcut) | 5-section report with ### headings, citations, confidence=high, confidence_score=1.0 |
+| C3 | `@Compare @AtomicHabits @MuscleBuilding give me a thorough analysis of everything` | Holistic (LLM classifies) | 5-section report — LLM recognizes "everything" = holistic despite long text |
+| C4 | `@Compare @AtomicHabits @MuscleBuilding how do they differ on goal setting?` | Focused | Table + analysis about goal setting, topic extracted by classification LLM |
+| C5 | Refresh page after C1 | — | Confidence badge, cost, citations all persist (format_response handles this) |
+| C6 | `@Compare @Web Search @AtomicHabits @MuscleBuilding` | Any | `validate_inputs` logs "dropping web search flag". Compare works normally — no web results in citations. |
+
+**LangSmith trace should show (focused):**
+```
+intent_resolver → doc_resolver → validate_inputs → compare → format_response
+```
+- `compare` span contains: `rewrite_query` child span, `search_chunks` child spans (one per doc), `invoke_structured` (classification + generation)
+
+**LangSmith trace should show (holistic):**
+```
+intent_resolver → doc_resolver → validate_inputs → compare → format_response
+```
+- `compare` span contains: `stratified_sample` child span, `extract_themes` child span, `invoke_structured` (generation)
+
+**Regression — Inquire + Summarize must still work:**
+- `@Inquire @AtomicHabits What is this about?` → normal RAG answer
+- `@Summarize @MuscleBuilding` → structured summary with key points
+- The builder change only swapped the compare import — other actions are untouched.
+
+---
+
+## Phase 4: Audit (~2 hrs)
 **Both text mode + policy mode in MVP.**
 
-- Replace `audit` stub
-- **Mode detection — deterministic via `doc_type` from database:**
-  - Query `documents` table for resolved doc IDs → check `doc_type` field (`company_policy` or `regulatory_source`)
-  - If at least one resolved doc has `doc_type = 'company_policy'` → **policy mode** (that doc is "source", regulatory docs are "targets")
-  - If ALL resolved docs are `regulatory_source` (no company policy tagged) → **text mode** (user's message text is the "source", tagged docs are "targets")
-  - Edge case: multiple `company_policy` docs → first one is source, rest become additional targets (warn user)
-  - Edge case: no resolved docs at all → text mode with user's message as source, search all user docs
-- **Text mode (source = user's free text):**
-  - Embed source text (from HumanMessage) → `match_chunks` scoped to target doc_ids
-  - k=5 per target, threshold=0.6 (higher precision for compliance)
-  - GPT-4o structured findings per target
-- **Policy mode (source = company_policy doc):**
-  - Step 1: Stratified sampling of source doc (reuse from Summarize, ~10 chunks)
-  - Step 2: `extract_themes()` (reuse from Compare, shared helper) → 3-5 themes
-  - Step 3: Per-theme retrieval against target docs (2-3 chunks per target per theme)
-  - Step 4: GPT-4o cross-reference per theme per target → structured findings
-- **Shared structured output:** `AuditResult` Pydantic model:
-  - `overall_status`: "Compliant" | "Minor Issues" | "Major Violations"
-  - `findings[]`: `{ target_doc_id, target_doc_title, theme?, severity, consequence, source_quote, target_quote, suggestion, confidence_score }`
-  - `summary`: cross-doc compliance insights
-- Frontend: severity badges (Critical=red, High=orange, Medium=yellow, Low=blue)
+**Overview:** Replace the audit stub with a real action node that has two pipelines: text mode (user's free text audited against tagged regulatory docs) and policy mode (uploaded company policy audited against tagged regulatory docs). Both modes share a common core: theme extraction → per-theme retrieval → GPT-4o structured findings. The difference is where themes come from (user text vs policy document). Short user text (< 200 chars) skips theme extraction and uses a single focused retrieval instead (cheaper, more accurate). Uses GPT-4o for generation (highest stakes — compliance risk analysis).
 
-**Test:**
-- Text: "Audit this email: [paste text] against @BankNegara2024" → structured findings
-- Policy: "@Audit @OurPolicy against @BankNegara2024" → theme-based findings with severity
+**Key architectural decisions:**
+- **Mode detection is deterministic (no LLM, $0)** — query `doc_type` from the `documents` table. If a `company_policy` doc is present → policy mode. Otherwise → text mode.
+- **Theme extraction in BOTH modes (with short-text optimization)** — policy mode always extracts themes from the source policy; text mode extracts themes from user text if ≥ 200 chars (smarter than raw-embedding a long email). Short text (< 200 chars) skips theme extraction and uses a single focused retrieval query — prevents diluted generic themes from a short sentence.
+- **Multiple company_policy docs** — only the FIRST one is used as source. Others are discarded from this audit run with a note in the response. Users can audit one policy at a time for optimal results.
+- **Severity indicators via emojis** — the LLM outputs `🔴 Critical`, `🟠 High`, `🟡 Medium`, `🔵 Low` in the markdown. The overall status banner uses `### 🔴 Major Violations` / `### 🟡 Minor Issues` / `### 🟢 Compliant`. All rendered by existing CitedMarkdown — zero frontend changes needed.
+- **No web search** — audit operates only on uploaded documents. `validate_inputs` drops the flag (needs `"audit"` added to the cleanup list).
+
+**Reuses from Phases 1-3:**
+- `search_chunks()` — per-theme targeted retrieval against regulatory docs
+- `stratified_sample()` — policy mode: sample source company_policy chunks
+- `extract_themes()` from `theme_service.py` — policy mode always; text mode only when ≥ 200 chars (short text skips it)
+- `rewrite_query()` with `"audit"` template — already built in `graph/utils.py`
+- `Citation` Pydantic model, `LLMService.invoke_structured()` → `LLMResult`
+- `format_response` metadata injection (no changes needed)
+- `@traceable` for LangSmith observability
+
+**Files changed:**
+
+| File | Change Type |
+|------|-------------|
+| `backend/app/models/action_schemas.py` | Add `AuditResponse` schema |
+| `backend/app/graph/nodes/audit.py` | **New file** — real audit action node |
+| `backend/app/graph/builder.py` | Swap import from `stub_actions.audit_action` → `audit.audit_action` |
+| `backend/app/graph/nodes/validate_inputs.py` | Add `"audit"` to web search cleanup + **remove Gate 2** (audit text check) |
+
+**Files NOT changed:** `state.py`, `llm_service.py`, `retrieval_service.py`, `theme_service.py`, `graph/utils.py`, `chat.py`, `format_response.py`, all frontend files.
 
 ---
 
-### Phase 5: Long Conversation Management (~30 min)
+### Sub-phase 4.1: AuditResponse Schema
+**Goal:** Add the Pydantic structured output schema for the audit LLM call.
+
+**File:** `backend/app/models/action_schemas.py`
+
+**Tasks:**
+1. Add `AuditFinding(BaseModel)` with fields:
+   - `severity: Literal["Critical", "High", "Medium", "Low"]` — compliance severity
+   - `theme: str` — the compliance area this finding relates to (e.g. "Capital Requirements")
+   - `description: str` — 1-2 sentence explanation of the gap or alignment
+   - `suggestion: str` — actionable remediation step
+
+2. Add `AuditResponse(BaseModel)` with fields:
+   - `overall_status: Literal["Compliant", "Minor Issues", "Major Violations"]` — top-level verdict
+   - `response: str` — full formatted markdown report with [N] citation markers, severity emojis, and professional structure
+   - `findings: list[AuditFinding]` — structured findings list for potential future UI rendering
+   - `citations: list[Citation]` — same Citation model as all other nodes
+
+**Why separate `response` AND `findings`?** The `response` field contains the beautifully formatted markdown report that `CitedMarkdown` renders directly (with emoji badges, blockquotes, headings). The `findings` list is the structured data — useful for programmatic access, filtering, and future frontend severity-badge components. The LLM generates both from the same analysis in one call.
+
+**Why NOT a separate `summary` field?** The summary is embedded as the first section of the `response` markdown (### Audit Summary). Extracting it to a separate field adds schema complexity for no benefit — the frontend renders `response` as-is.
+
+---
+
+### Sub-phase 4.2: validate_inputs — Audit Cleanup
+**Goal:** Two changes: (1) drop `enable_web_search` flag for audit, (2) remove Gate 2 from `validate_inputs` — text-mode source-text validation moves into `audit_action` where mode context is available.
+
+**File:** `backend/app/graph/nodes/validate_inputs.py`
+
+**Tasks:**
+1. Change web search cleanup: `if action in ("compare", "summarize")` → `if action in ("compare", "summarize", "audit")`
+2. **Remove Gate 2 entirely** — delete the `elif action == "audit" and _is_audit_text_missing(state):` block and the `_is_audit_text_missing()` helper function.
+3. Gate 1 (doc count check, `"audit": 1`) remains — audit always needs at least 1 target regulatory doc.
+
+**Why move Gate 2?** `validate_inputs` doesn't know whether the audit is text mode or policy mode. In policy mode (`@Audit @OurPolicy against @BankNegara`), there IS no free text — the source is the tagged document. Gate 2 would incorrectly fire and ask the user for text they don't need to provide. The audit node determines the mode in Step 2, so it's the right place to check whether source text is needed (text mode only) and interrupt if missing.
+
+---
+
+### Sub-phase 4.3: Audit Action Node
+**Goal:** Create the real `audit_action` that replaces the stub. Contains mode detection, theme extraction for both modes, per-theme retrieval, and GPT-4o structured generation.
+
+**File:** `backend/app/graph/nodes/audit.py` (new file)
+
+**Pipeline (11 steps):**
+
+```
+Step 1: Read state
+  → resolved_doc_ids, resolved_doc_titles, clean_query, user_id, user_industry, user_location, messages
+
+Step 2: Mode detection (deterministic, $0)
+  → Query documents table: SELECT id, doc_type FROM documents WHERE id IN (resolved_doc_ids)
+  → company_policies = [docs where doc_type = 'company_policy']
+  → regulatory_docs = [docs where doc_type = 'regulatory_source']
+  → If company_policies is not empty → POLICY MODE (first = source, regulatory = targets)
+  → Else → TEXT MODE (user message text = source, all resolved docs = targets)
+  → Use resolved_doc_titles from state for all title lookups (already built by doc_resolver, zero extra queries)
+
+Step 2b: TEXT MODE — validate source text (Gate 2, moved from validate_inputs)
+  → Only runs for text mode (policy mode has the document as source — no user text needed)
+  → Check clean_query: strip @mentions, if < 50 chars → interrupt() asking for audit text
+  → Cancel sentinel → return friendly cancel message via Command(goto="format_response")
+  → Resume → use the provided text as clean_query, continue pipeline
+  → Policy mode skips this step entirely — no text validation needed
+
+Step 3: Handle multiple company_policy edge case
+  → If len(company_policies) > 1 → only use first one, set discard_notice for response
+  → "Note: Only '{first_policy_title}' was used as the audit source. Audit one policy at a time for optimal results."
+
+Step 4: Extract source content
+  ├── POLICY MODE: stratified_sample(user_id, [source_doc_id]) → ~16 source chunks
+  └── TEXT MODE: clean_query text (already validated in Step 2b)
+
+Step 5: Extract themes — mode-aware with short-text optimization
+  ├── POLICY MODE: extract_themes(source_chunks, {source_doc_id: source_title}) → 3-5 themes (always)
+  ├── TEXT MODE (≥ 200 chars): extract_themes(text_pseudo_chunks, {"user_text": "Audit Source"}) → 3-5 themes
+  └── TEXT MODE (< 200 chars): SKIP theme extraction ($0). Use rewrite_query(clean_query, targets, "audit") directly
+      → Single focused retrieval call (one topic, not diluted across 3-5 generic themes)
+  → Track theme extraction cost/tokens (if applicable)
+
+Step 6: Retrieval against target regulatory docs
+  ├── MULTI-THEME path (policy mode OR long text mode):
+  │   → For each theme (3-5 themes):
+  │     → rewrite_query(theme, target_doc_titles, "audit") → optimized search query
+  │     → search_chunks(optimized_query, user_id, target_doc_ids, k=5, threshold=0.6)
+  │   → Merge all per-theme chunks (deduplicate by chunk ID)
+  └── SINGLE-QUERY path (short text mode):
+      → rewrite_query(clean_query, target_doc_titles, "audit") → one optimized query
+      → search_chunks(optimized_query, user_id, target_doc_ids, k=10, threshold=0.6)
+      → k=10 since there's only one query (not diluted across themes)
+  → Confidence: average similarity across all chunks
+
+Step 7: Build audit context block
+  → _build_audit_context(source_content, theme_chunks, target_doc_titles)
+  → Section 1: SOURCE MATERIAL (policy excerpts or user text)
+  → Section 2: Per-theme regulatory context with [N] numbered chunks grouped by theme
+
+Step 8: Build system prompt (mode-aware)
+  → Include: themes list, source type (policy/text), target doc names
+  → Formatting instructions: severity emojis, professional structure, visual hierarchy
+
+Step 9: Build human message
+  → POLICY MODE: "Audit the source policy against the regulatory targets for compliance gaps."
+  → TEXT MODE: clean_query or "Audit the provided text against the regulatory documents."
+
+Step 10: GPT-4o generation
+  → invoke_structured("audit", AuditResponse, messages) → LLMResult
+  → Track generation cost/tokens
+
+Step 11: Return state update
+  → Sum ALL costs: theme extraction + (rewrite_query per theme, untracked) + generation
+  → Prepend discard_notice if applicable
+  → Same return shape as other action nodes
+```
+
+**Mode detection helper — `_detect_audit_mode()`:**
+
+```
+Input: resolved_doc_ids, resolved_doc_titles (from AgentState), user_id
+Output: {
+  mode: "text" | "policy",
+  source_doc_id: str | None,        # only for policy mode
+  source_doc_title: str | None,     # from resolved_doc_titles, not re-fetched
+  target_doc_ids: list[str],
+  target_doc_titles: dict[str, str],  # subset of resolved_doc_titles
+  discard_notice: str | None,        # if multiple company_policy docs
+}
+```
+
+Implementation: one Supabase query — `SELECT id, doc_type FROM documents WHERE id IN (resolved_doc_ids)` (only `id` and `doc_type` — titles already in `resolved_doc_titles` from `AgentState`, no redundant fetch). Pure Python classification, $0 cost.
+
+**Text mode — two paths based on text length:**
+- **Long text (≥ 200 chars):** Wrap `clean_query` into pseudo-chunk dicts `[{"content": clean_query, "document_id": "user_text"}]` and pass to `extract_themes()`. This reuses the uniform `list[dict]` interface — `extract_themes` doesn't need to know where the text came from.
+- **Short text (< 200 chars):** Skip theme extraction entirely. A single sentence like "We share data with third parties" produces diluted generic themes. Instead, use `rewrite_query(clean_query, target_doc_titles, "audit")` directly and do one retrieval pass with `k=10`. Cheaper ($0 theme cost) and more accurate for short inputs.
+
+**Context block helper — `_build_audit_context()`:**
+
+```
+── SOURCE MATERIAL ──
+{source description: "The following excerpts are from {title}:" or "The user provided this text for audit:"}
+{source text/chunks — no [N] numbering, these are the AUDIT SOURCE not citation targets}
+
+── REGULATORY CONTEXT (by theme) ──        ← multi-theme path
+#### Theme: {theme_name}
+[1] Source: {RegDocTitle} | Page: {page} | DocID: {uuid}
+"{chunk content}"
+[2] ...
+
+── REGULATORY CONTEXT ──                   ← single-query path (no theme headers)
+[1] Source: {RegDocTitle} | Page: {page} | DocID: {uuid}
+"{chunk content}"
+[2] ...
+```
+
+Only regulatory chunks get `[N]` numbering (they are the citation targets). Source material is shown for reference but doesn't get cited — the LLM cites the regulation that applies.
+
+For the **single-query path** (short text, no themes extracted): the system prompt's `COMPLIANCE THEMES:` line is replaced with `AUDIT FOCUS: {clean_query}` — giving the LLM the user's original text as the audit topic rather than extracted themes.
+
+**System prompt (shared by both modes):**
+
+```
+You are a compliance audit analyst for PolicyPal.
+
+SOURCE ({mode_label}):
+{source_section}
+
+REGULATORY CONTEXT:
+{regulatory_context_block}
+
+COMPLIANCE THEMES: {themes_list}
+
+TASK: Conduct a thorough compliance audit of the source material against the regulatory documents.
+
+Structure your report as follows:
+
+### {emoji} {Overall Status}
+One sentence stating the overall compliance verdict.
+
+#### Audit Summary
+2-3 sentences summarising the key compliance position across all themes.
+
+Then for each finding, use this format:
+> {severity_emoji} **{severity}: {Theme}**
+> **Gap:** {what is missing or misaligned}
+> **Regulation requires:** {quote from regulatory doc} [N]
+> **Suggestion:** {actionable fix}
+
+Group findings by severity — Critical findings first, then High, Medium, Low.
+
+After all findings:
+#### Recommendations
+A prioritised bullet list (3-5 bullets) of the most impactful actions to improve compliance.
+
+SEVERITY EMOJIS:
+- 🔴 Critical — immediate regulatory violation requiring urgent action
+- 🟠 High — significant gap that should be addressed promptly
+- 🟡 Medium — partial compliance, improvement recommended
+- 🔵 Low — minor or best-practice enhancement
+
+OVERALL STATUS EMOJIS:
+- 🔴 Major Violations — at least one Critical finding
+- 🟡 Minor Issues — no Critical, but High or Medium findings exist
+- 🟢 Compliant — only Low findings or no findings
+
+RULES:
+- CITATION IDs: Each citation's `id` MUST equal the exact [N] number you wrote in the response.
+- Cite regulatory passages with [N] when stating what the regulation requires.
+- Use ONLY the context above. Do not use prior knowledge.
+- Bold the regulatory requirement name in each finding.
+- Use *italics* for document names.
+- In each citation, copy the exact verbatim text from the source into the quote field.
+- Set doc_id to the DocID value shown in the context header.{user_context}
+
+FORMAT: Return overall_status, response (formatted markdown with severity emojis, > blockquotes, [N] markers), findings (structured list), and citations. Each citation id must match its [N] marker exactly.
+```
+
+**Edge cases handled:**
+- Text mode + `clean_query` too short (< 50 chars after stripping) → Step 2b `interrupt()` inside `audit_action` asks for text
+- Text mode + interrupt cancelled → return friendly cancel via `Command(goto="format_response")`
+- Policy mode → Step 2b skipped entirely (source is the tagged document, no user text needed)
+- 0 docs resolved → Gate 1 in `validate_inputs` catches this (already built)
+- Multiple `company_policy` docs → first = source, others discarded + notice prepended
+- Short user text (< 200 chars, text mode) → skip theme extraction, single focused retrieval with k=10
+- Theme extraction fails → fallback themes from `theme_service.py` (already built)
+- Per-theme retrieval returns 0 chunks for a theme → that theme gets no findings, LLM notes "no regulatory guidance found"
+- ALL themes/queries return 0 chunks → respond with "No relevant regulatory passages found" + confidence=low
+- Cost tracking: theme_result (if applicable) + generation_result summed into `tokens_used` and `cost_usd`
+- Web search tagged → dropped by `validate_inputs` (sub-phase 4.2)
+
+---
+
+### Sub-phase 4.4: Builder Wiring
+**Goal:** Replace the stub import with the real audit node.
+
+**File:** `backend/app/graph/builder.py`
+
+**Tasks:**
+1. Change import: `from app.graph.nodes.stub_actions import audit_action` → `from app.graph.nodes.audit import audit_action`
+2. No edge changes — `"audit"` node name already exists in the graph.
+3. After this change, `stub_actions.py` only contains dead code (`_build_stub_response`, the old stubs). Can be deleted but not required.
+
+---
+
+### Sub-phase 4.5: Integration Tests
+
+**Test scenarios — all must pass:**
+
+| # | Input | Expected Mode | Expected Output |
+|---|-------|--------------|-----------------|
+| T1 | `@Audit We store customer data for 10 years and share it with third parties @BankNegara2024` | Text (short) | Single-query retrieval (< 200 chars, no theme extraction). Findings with severity emojis, blockquote format, regulatory citations |
+| T2 | `@Audit @OurCompanyPolicy against @BankNegara2024` | Policy | Theme-based policy-vs-regulation findings with severity and recommendations |
+| T3 | `@Audit @OurCompanyPolicy @SGIslamicBanking @BankNegara2024` | Policy | Source=OurCompanyPolicy, Targets=SG+BN. Multi-target audit. |
+| T4 | `@Audit @PolicyA @PolicyB against @BankNegara2024` (both company_policy) | Policy | Source=PolicyA only. Response includes: "Note: Only 'PolicyA' was used as the audit source." |
+| T5 | `@Audit @BankNegara2024` (no text, only regulatory doc) | Text | Step 2b interrupt inside audit_action → PalAssist asks for text → user provides → findings generated |
+| T6 | `@Audit @Web Search @OurPolicy @BankNegara2024` | Policy | Web search dropped. Audit works normally. |
+| T7 | `@Audit Our company retains all customer personal data for 10 years without review. We share full datasets including financial records with overseas third-party processors without DPIAs. Employee access is unrestricted across all departments. @BankNegara2024` | Text (long) | ≥ 200 chars → theme extraction → multi-theme retrieval. Themed findings grouped by severity. |
+| T8 | Refresh page after T2 | — | Confidence badge, cost, citations all persist |
+
+**LangSmith trace should show:**
+```
+intent_resolver → doc_resolver → validate_inputs → audit → format_response
+```
+- `audit` span contains: `extract_themes` child span (if multi-theme path), `rewrite_query` + `search_chunks` per theme (or single call for short-text path), `invoke_structured` (generation)
+
+---
+
+## Phase 5: Long Conversation Management (~30 min)
 **Prevent context overflow for long conversations.**
 
 - **Dedicated graph node `summarize_context`** (NOT a helper function — changed from original plan)
@@ -532,7 +1265,7 @@ Six sub-phases, each independently testable. Must complete in order (each depend
 
 ---
 
-### Phase 6: Polish (~45 min)
+## Phase 6: Polish (~45 min)
 
 - Sources panel: click citation in chat → scroll sources panel to that citation
 - Confidence badge tooltips on hover
@@ -542,7 +1275,7 @@ Six sub-phases, each independently testable. Must complete in order (each depend
 
 ---
 
-### Phase 7: Deploy (~30 min)
+## Phase 7: Deploy (~30 min)
 
 - Render deployment (FastAPI + requirements.txt)
 - Vercel deployment (Next.js)

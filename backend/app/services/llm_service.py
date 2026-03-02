@@ -48,11 +48,12 @@ class LLMResult(NamedTuple):
 _ACTION_TO_MODEL: dict[str, str] = {
     "intent": "gpt-4o-mini",        # classification before action is known
     "doc_resolution": "gpt-4o-mini", # name matching — simple, cheap
-    "query_rewrite": "gpt-4o-mini",  # query optimisation utility — ~$0.0001/call
+    "query_rewrite":     "gpt-4o-mini",  # query optimisation utility — ~$0.0001/call
+    "query_rewrite_web": "gpt-4o-mini",  # combined retrieval + web query rewrite
     "summarize": "gpt-4o-mini",      # extraction task — cost-efficient
     "inquire": "gpt-4o-mini",        # targeted Q&A — cost-efficient
-    "compare": "gpt-4o",             # multi-theme synthesis — needs reasoning
-    "audit": "gpt-4o",               # legal risk analysis — highest stakes
+    "compare": "gpt-4o-mini",        # TEMP: testing — swap back to gpt-4o for production
+    "audit": "gpt-4o-mini",               # legal risk analysis — highest stakes
 }
 
 # USD per token — used for per-call cost logging

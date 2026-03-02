@@ -15,7 +15,7 @@ export function CitationCard({ citation }: Props) {
   const isWeb = citation.source_type === "web";
 
   return (
-    <div className="rounded-xl border border-white/30 bg-white/30 backdrop-blur-sm p-3 space-y-2 hover:bg-white/40 transition-colors">
+    <div className="rounded-xl border border-white/60 bg-white/80 backdrop-blur-sm p-3 space-y-2 hover:bg-white/90 transition-colors">
       {/* Header: icon + title + page/url */}
       <div className="flex items-start gap-2">
         <div className="mt-0.5 h-6 w-6 flex-shrink-0 rounded-lg bg-primary/10 flex items-center justify-center">
