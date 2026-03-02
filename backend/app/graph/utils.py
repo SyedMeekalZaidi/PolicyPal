@@ -1,19 +1,20 @@
-# Query rewrite utility — optimises the user's cleaned message into an
-# embedding-friendly retrieval query (and optionally a Tavily web query)
-# before semantic retrieval in action nodes.
+# Shared graph utilities:
 #
-# Called by:  inquire_action (retrieval + optional web query)
-#             compare_action, audit_action (retrieval only)
-# NOT called by: summarize_action (uses stratified sampling, not semantic search).
+# sanitize_history(messages) — clean conversation history ONCE before it flows to
+#   any LLM. Called at the top of inquire_action; clean list is passed to both
+#   rewrite_query() and _get_history_window() so sanitization never runs twice.
+#
+# rewrite_query(...) — optimises the user's cleaned message into an
+#   embedding-friendly retrieval query (and optionally a Tavily web query).
+#   Called by inquire_action (retrieval + optional web query),
+#   compare_action, and audit_action (retrieval only).
+#   NOT called by summarize_action (uses stratified sampling, not semantic search).
 #
 # Design:
 #   - Returns QueryRewriteResult(retrieval, web) — a NamedTuple.
-#   - When web_search=False (compare, audit), web=None and the LLM produces
-#     only an optimised retrieval query (existing behaviour, backward-compat).
-#   - When web_search=True (inquire), a single LLM call produces BOTH a dense
-#     retrieval query for pgvector AND a natural-language web query for Tavily.
-#   - Optional `messages` parameter injects the last 4 conversation turns so
-#     the rewriter can resolve pronouns like "these regulations", "that policy".
+#   - When web_search=False (compare, audit), web=None.
+#   - When web_search=True (inquire), one LLM call produces BOTH queries.
+#   - Optional `messages` receives pre-sanitized history from inquire_action.
 #   - Falls back to clean_query / clean_query[:150] on any LLM failure.
 
 import logging
@@ -123,10 +124,12 @@ _WEB_SYSTEM_PROMPT = (
     "document(s). Dense, keyword-rich, using the document's technical terminology and "
     "subject matter as context.\n\n"
     "2. WEB QUERY (10-20 words): For a web search engine to find real-world regulatory "
-    "information online. Use official real-world names (e.g. 'Bank Negara Malaysia' not "
-    "'MY-Islamic-Banking', 'MAS Notice 637' not 'SG-Islamic-Guidelines'). Include temporal "
-    "context for time-sensitive questions (e.g. '2026', 'current', 'latest'). Never use "
-    "internal document labels or system names.\n\n"
+    "information online. Always use official regulator names and document titles — never "
+    "internal document labels or system names. Include temporal context for time-sensitive "
+    "questions (e.g. '2026', 'current', 'latest').\n"
+    "   Examples: 'MY-Islamic-Banking' → 'Bank Negara Malaysia Shariah Governance policy 2019'; "
+    "'EU-CRR-2024' → 'European Capital Requirements Regulation CRR2 2024 update'; "
+    "'SG-PDPA-Guidelines' → 'Singapore PDPC Personal Data Protection Act guidelines'.\n\n"
     "RULES:\n"
     "- Use conversation context to resolve ambiguous references.\n"
     "- Preserve the core intent of the original question.\n"
@@ -168,6 +171,66 @@ def _build_history_block(messages: list, n: int = 4) -> str:
             lines.append(f"AI: {truncated}")
 
     return "\n".join(lines) if lines else "(No prior conversation)"
+
+
+def sanitize_history(messages: list) -> list:
+    """Remove anchoring noise from conversation history before it reaches any LLM.
+
+    Called ONCE at the start of inquire_action. The cleaned list is passed to
+    both rewrite_query() and _get_history_window() — no duplicate sanitization.
+
+    Filter A — Collapse consecutive duplicate human messages:
+        When a user retries the same question (e.g. 3x), only the last occurrence
+        and its paired AI response are kept. Earlier identical pairs are dropped.
+        Exact string match after .strip().lower() — no fuzzy matching.
+
+    Filter B — Replace failed AI responses with a short neutral note:
+        AIMessages with an empty citations list (format_response ran but found
+        nothing) are content-replaced with a brief note to prevent the generation
+        LLM anchoring on verbose "The context does not provide..." text.
+        AIMessages with citations (successful answers) pass through unchanged.
+        AIMessages with no citations key (cancel/interrupt) pass through unchanged.
+    """
+    if not messages:
+        return messages
+
+    # ── Filter A: drop earlier occurrences of repeated human messages ─────────
+    # Walk backwards — the first time we see a human content it's the LAST
+    # (most-recent) occurrence, which we keep. Any earlier occurrence is dropped
+    # along with its immediately following AI response.
+    human_indices = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+
+    indices_to_drop: set[int] = set()
+    seen_contents: set[str] = set()
+
+    for idx in reversed(human_indices):
+        content = messages[idx].content if isinstance(messages[idx].content, str) else str(messages[idx].content)
+        normalized = content.strip().lower()
+
+        if normalized in seen_contents:
+            # Earlier duplicate — drop this Human turn and its paired AI response
+            indices_to_drop.add(idx)
+            if idx + 1 < len(messages) and isinstance(messages[idx + 1], AIMessage):
+                indices_to_drop.add(idx + 1)
+        else:
+            seen_contents.add(normalized)
+
+    deduped = [m for i, m in enumerate(messages) if i not in indices_to_drop]
+
+    # ── Filter B: replace "no-answer" AI content with a short neutral note ────
+    result: list = []
+    for msg in deduped:
+        if isinstance(msg, AIMessage):
+            citations = msg.additional_kwargs.get("citations")
+            if citations is not None and len(citations) == 0:
+                # Failed response — replace content, preserve all other kwargs
+                result.append(msg.model_copy(update={
+                    "content": "[No relevant content was found for this question]"
+                }))
+                continue
+        result.append(msg)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

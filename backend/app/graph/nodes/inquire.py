@@ -28,7 +28,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langsmith import traceable
 
 from app.graph.state import AgentState
-from app.graph.utils import rewrite_query
+from app.graph.utils import rewrite_query, sanitize_history
 from app.models.action_schemas import InquireResponse
 from app.services.llm_service import get_llm_service
 from app.services.retrieval_service import search_chunks
@@ -89,6 +89,8 @@ RULES — WEB SOURCES (entries marked "(web)"):
 - Present web-sourced findings with an appropriate caveat, e.g. "Based on recent sources, ... however, confirm directly with the regulator for authoritative confirmation."
 - Set source_type to "web" and doc_id to null.
 - Do not fabricate specific regulatory text, clause numbers, or dates not present in the web content.
+
+CRITICAL: Analyze ALL provided sources freshly. Do NOT echo or repeat prior conversation responses — each turn has new retrieval and web context. If a previous response said it could not find information, that does NOT apply now — re-examine ALL sources above.
 
 CITATION IDs: Each citation id MUST equal the exact [N] number written in the response. Never renumber.
 If no context is relevant to the question, state that clearly — do not guess.{user_context}
@@ -229,6 +231,10 @@ def inquire_action(state: AgentState) -> dict:
     Returns partial state update with response, citations, retrieval metadata, and cost.
     """
     messages = state.get("messages") or []
+    # Sanitize ONCE — dedup repeated questions + replace failed AI responses.
+    # Downstream consumers (rewrite_query, _get_history_window) receive this
+    # clean list directly; no duplicate sanitization runs.
+    clean_messages = sanitize_history(messages)
     resolved_doc_ids: list[str] = state.get("resolved_doc_ids") or []
     resolved_doc_titles: dict = state.get("resolved_doc_titles") or {}
     enable_web_search: bool = state.get("enable_web_search") or False
@@ -254,7 +260,7 @@ def inquire_action(state: AgentState) -> dict:
         query,
         resolved_doc_titles,
         "inquire",
-        messages=messages,
+        messages=clean_messages,
         web_search=enable_web_search,
     )
     retrieval_query = rewrite_result.retrieval
@@ -295,7 +301,7 @@ def inquire_action(state: AgentState) -> dict:
     # ── Step 5: Build conversation history window ─────────────────────────────
     # Last 6 messages (3 turns) before the current query — gives the LLM context
     # to resolve follow-up pronouns ("these regulations", "that policy", "it").
-    history_window = _get_history_window(messages, n=6)
+    history_window = _get_history_window(clean_messages, n=6)
     history_note = _HISTORY_NOTE if history_window else ""
     logger.info("inquire | history_window=%d messages", len(history_window))
 
