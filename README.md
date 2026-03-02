@@ -15,6 +15,23 @@ PolicyPal is a **production-grade AI agent** that automates this. Upload your re
 
 ---
 
+## The AI Agentic Solution
+
+PolicyPal isn't a chatbot with a system prompt. It's a **stateful agent** that reasons about your request, finds the right documents, picks the right strategy, and knows when to stop and ask instead of guess.
+
+| Capability | What It Means | Why It Matters |
+|:-----------|:-------------|:---------------|
+| **Stateful Graph Orchestration** | LangGraph state machine with 8 nodes, conditional routing, and persistent checkpoints | The agent can pause mid-execution, ask the user a question, and resume from the exact same state — even after a browser refresh |
+| **Smart Context Resolution** | 3-stage doc resolution: Python pre-processor → LLM inference → fuzzy match fallback | Users say "audit against those two docs" and the agent resolves "those two" from conversation history. 39% of queries resolve at $0 |
+| **Action-Specific Retrieval** | Each of the 4 actions owns its own RAG strategy (adaptive-k, stratified sampling, theme-based, dual-mode) | A summarization task needs broad coverage; a Q&A task needs precision. One retrieval pipeline can't do both well |
+| **Dual Confidence Scoring** | Inference confidence (right docs?) + retrieval confidence (right evidence?) — measured separately | The agent knows when it's uncertain and stops to ask instead of hallucinating. Two scores because "found the right doc" ≠ "found the right answer" |
+| **Hybrid Model Routing** | GPT-4o for high-stakes tasks (audit, holistic compare), GPT-4o-mini for routine (summarize, inquire) | ~60% cost reduction with no quality loss on extraction tasks. Model choice is abstracted behind an LLM service layer |
+| **Human-in-the-Loop** | LangGraph `interrupt()` pauses the graph; PalAssist prompts the user; `Command(resume=...)` continues | Never guesses when uncertain — asks. Compliance is not the domain for "best effort" answers |
+| **Real-Time Agent Transparency** | SSE events stream node-by-node status (PalReasoning) as the graph executes | Users see "Finding documents..." → "Auditing against regulations..." in real time. Builds trust, eliminates the black-box feeling |
+| **Persistent Memory** | PostgresSaver checkpointer + `conversation_docs` registry that accumulates across turns | Close your browser, come back tomorrow — the agent remembers every document discussed in this conversation |
+
+---
+
 ## What It Does
 
 | Action | What It Solves | How It Works |
@@ -348,5 +365,5 @@ INTERNAL_API_KEY=shared_secret
 ---
 
 <p align="center">
-  Built by <a href="https://github.com/YOUR_GITHUB">Roman</a> — AI Engineer
+  Built by <a href="https://github.com/SyedMeekalZaidi">Meekal</a> — AI Engineer
 </p>
