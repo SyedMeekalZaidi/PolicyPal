@@ -6,6 +6,7 @@
 # Once streaming starts the status code is locked — errors after that point are
 # yielded as {"type": "error", "message": "..."} events, not HTTP error responses.
 
+import asyncio
 import json
 import logging
 import traceback
@@ -249,9 +250,18 @@ async def _stream_graph(input_or_command, config: dict, user_id: str = ""):
                 )
                 yield _sse_error("Graph completed without producing a response.")
 
+        except (GeneratorExit, asyncio.CancelledError):
+            # Normal shutdown paths (client disconnected, request cancelled, or
+            # StreamingResponse closed) should not be treated as errors in
+            # LangSmith. We intentionally swallow these so successful runs and
+            # user-initiated cancels stay green in traces.
+            return
         except Exception as exc:
             logger.error("Graph streaming error:\n%s", traceback.format_exc())
+            # Send a terminal error event to the client for good UX, then
+            # re-raise so LangSmith correctly marks the run as failed.
             yield _sse_error(f"An error occurred: {str(exc)}")
+            raise
 
 
 # ---------------------------------------------------------------------------
